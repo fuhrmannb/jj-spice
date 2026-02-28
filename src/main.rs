@@ -1,3 +1,6 @@
+mod cli;
+
+use clap::Parser;
 use jj_cli::{cli_util::find_workspace_dir, config};
 use jj_lib::{
     config::{ConfigGetError, StackedConfig},
@@ -5,7 +8,10 @@ use jj_lib::{
 };
 use std::env;
 
+use cli::Cli;
+
 fn main() {
+    let _ = Cli::parse();
     let config = match setup_config() {
         Ok(c) => c,
         Err(e) => panic!("Failed to load config: {}", e),

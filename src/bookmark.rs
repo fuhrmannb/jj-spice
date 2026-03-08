@@ -1,3 +1,6 @@
+/// DAG of bookmarks between trunk and head for stack operations.
+pub mod graph;
+
 /// A remote that tracks this bookmark.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RemoteTracking {

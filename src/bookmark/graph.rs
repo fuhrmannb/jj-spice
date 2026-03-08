@@ -10,7 +10,7 @@ use jj_lib::{
 };
 use thiserror::Error;
 
-use crate::bookmark::{Bookmark, RemoteTracking};
+use super::{Bookmark, RemoteTracking};
 
 /// A node in the bookmark DAG, wrapping a [`Bookmark`] with ancestry info.
 #[derive(Clone, Debug)]

@@ -7,7 +7,7 @@ use jj_lib::config::{ConfigFile, ConfigSource};
 use jj_lib::repo::Repo;
 
 use crate::bookmark::Bookmark;
-use crate::bookmark_graph::{BookmarkGraph, BookmarkNode};
+use crate::bookmark::graph::{BookmarkGraph, BookmarkNode};
 use crate::commands::env::{SpiceEnv, cmd_err};
 use crate::forge::Forge;
 use crate::forge::detect::{

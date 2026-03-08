@@ -1,5 +1,4 @@
 mod bookmark;
-mod bookmark_graph;
 mod commands;
 mod forge;
 mod protos;

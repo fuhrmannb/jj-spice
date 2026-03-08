@@ -15,6 +15,37 @@ use thiserror::Error;
 
 use crate::bookmark::Bookmark;
 
+#[derive(Clone, Debug)]
+pub struct BookmarkNode {
+    bookmark: Bookmark,
+    ascendants: Vec<String>,
+}
+
+impl BookmarkNode {
+    pub fn new(bookmark: Bookmark) -> Self {
+        Self {
+            bookmark,
+            ascendants: Vec::new(),
+        }
+    }
+
+    pub fn bookmark(&self) -> &Bookmark {
+        &self.bookmark
+    }
+
+    pub fn name(&self) -> &str {
+        self.bookmark.name()
+    }
+
+    pub fn ascendants(&self) -> &[String] {
+        &self.ascendants
+    }
+
+    pub fn add_ascendant(&mut self, ascendant: String) {
+        self.ascendants.push(ascendant);
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum BookmarkGraphError {
     #[error("revset evaluation failed")]
@@ -29,8 +60,9 @@ pub enum BookmarkGraphError {
 
 #[derive(Debug)]
 pub struct BookmarkGraph {
-    nodes: HashMap<Bookmark, Vec<GraphEdge<String>>>,
-    head_bookmarks: HashSet<Bookmark>,
+    nodes: HashMap<String, BookmarkNode>,
+    edges: HashMap<String, Vec<GraphEdge<String>>>,
+    head_bookmarks: HashSet<String>,
 }
 
 impl BookmarkGraph {
@@ -41,41 +73,27 @@ impl BookmarkGraph {
     ) -> Result<Self, BookmarkGraphError> {
         let bookmarks_per_commit = Self::build_bookmark_commit_map(repo);
         let reversed = Self::build_reversed_commit_graph(repo, workspace, trunk_name)?;
-        let nodes = Self::build_bookmark_graph(&reversed, &bookmarks_per_commit);
-        let head_bookmarks = Self::find_head_bookmarks(&nodes);
+        let (nodes, edges) = Self::build_bookmark_graph(&reversed, &bookmarks_per_commit);
+        let head_bookmarks = Self::find_head_bookmarks(&edges);
         Ok(Self {
             nodes,
+            edges,
             head_bookmarks,
         })
     }
 
-    pub fn iter_graph(&self) -> Result<impl Iterator<Item = &Bookmark>, BookmarkGraphError> {
-        let string_to_bookmark: HashMap<&str, &Bookmark> =
-            self.nodes.keys().map(|b| (b.name(), b)).collect();
+    pub fn iter_graph(&self) -> Result<impl Iterator<Item = &BookmarkNode>, BookmarkGraphError> {
         let result = topo_order_forward(
-            self.heads().iter(),
-            |b| b.name(),
-            |&b| {
-                self.edges(b)
-                    .unwrap_or_default()
+            self.head_bookmarks.iter().map(|name| &self.nodes[name]),
+            |node| node.name(),
+            |&node| {
+                self.edges[node.name()]
                     .iter()
-                    .map(|e| *string_to_bookmark.get(e.target.as_str()).unwrap())
+                    .map(|e| &self.nodes[e.target.as_str()])
             },
             |_| BookmarkGraphError::Cycle,
         )?;
         Ok(result.into_iter())
-    }
-
-    pub fn edges(&self, bookmark: &Bookmark) -> Option<&[GraphEdge<String>]> {
-        self.nodes.get(bookmark).map(Vec::as_slice)
-    }
-
-    pub fn heads(&self) -> &HashSet<Bookmark> {
-        &self.head_bookmarks
-    }
-
-    pub fn bookmarks(&self) -> impl Iterator<Item = &Bookmark> {
-        self.nodes.keys()
     }
 
     fn symbol_resolver(repo: &dyn Repo) -> SymbolResolver<'_> {
@@ -131,32 +149,39 @@ impl BookmarkGraph {
         Ok(reverse_graph(revset.iter_graph(), |id| id).expect("commit graph should be acyclic"))
     }
 
-    fn build_bookmark_graph(
-        reversed: &[GraphNode<CommitId>],
-        bookmarks_per_commit: &HashMap<CommitId, Bookmark>,
-    ) -> HashMap<Bookmark, Vec<GraphEdge<String>>> {
-        let commit_index: HashMap<&CommitId, &GraphNode<CommitId>> =
-            reversed.iter().map(|node| (&node.0, node)).collect();
-
-        // Find head commits (roots of the reversed/parent→child graph)
+    fn find_head_commits(reversed: &[GraphNode<CommitId>]) -> Vec<&CommitId> {
         let all_edge_targets: HashSet<&CommitId> = reversed
             .iter()
             .flat_map(|(_, edges)| edges.iter().map(|e| &e.target))
             .collect();
 
-        let head_commits: Vec<&CommitId> = reversed
+        reversed
             .iter()
             .map(|(id, _)| id)
             .filter(|id| !all_edge_targets.contains(id))
-            .collect();
+            .collect()
+    }
 
-        let mut registered: HashMap<Bookmark, Vec<GraphEdge<String>>> = HashMap::new();
+    fn build_bookmark_graph(
+        reversed: &[GraphNode<CommitId>],
+        bookmarks_per_commit: &HashMap<CommitId, Bookmark>,
+    ) -> (
+        HashMap<String, BookmarkNode>,
+        HashMap<String, Vec<GraphEdge<String>>>,
+    ) {
+        let commit_index: HashMap<&CommitId, &GraphNode<CommitId>> =
+            reversed.iter().map(|node| (&node.0, node)).collect();
+
+        let head_commits = Self::find_head_commits(reversed);
+
+        let mut nodes: HashMap<String, BookmarkNode> = HashMap::new();
+        let mut edges: HashMap<String, Vec<GraphEdge<String>>> = HashMap::new();
         let mut visited: HashSet<&CommitId> = HashSet::new();
 
-        let mut stack: Vec<(&CommitId, Option<&Bookmark>)> =
+        let mut stack: Vec<(&CommitId, Option<&str>)> =
             head_commits.into_iter().map(|c| (c, None)).collect();
 
-        while let Some((commit_id, parent_bookmark)) = stack.pop() {
+        while let Some((commit_id, parent_name)) = stack.pop() {
             if !visited.insert(commit_id) {
                 continue;
             }
@@ -164,38 +189,54 @@ impl BookmarkGraph {
             let maybe_bookmark = bookmarks_per_commit.get(commit_id);
 
             if let Some(bookmark) = maybe_bookmark {
-                registered.entry(bookmark.clone()).or_default();
+                let name = bookmark.name().to_string();
 
-                if let Some(pb) = parent_bookmark
-                    && pb != bookmark
-                    && let Some(edges) = registered.get_mut(bookmark)
+                if !nodes.contains_key(&name) {
+                    let mut node = BookmarkNode::new(bookmark.clone());
+
+                    // Ascendants = parent's ascendants + parent
+                    if let Some(pn) = parent_name {
+                        if let Some(parent_node) = nodes.get(pn) {
+                            for asc in parent_node.ascendants() {
+                                node.add_ascendant(asc.clone());
+                            }
+                        }
+                        node.add_ascendant(pn.to_string());
+                    }
+
+                    nodes.insert(name.clone(), node);
+                }
+
+                let edge_list = edges.entry(name.clone()).or_default();
+                if let Some(pn) = parent_name
+                    && pn != name
                 {
-                    edges.push(GraphEdge::direct(pb.name().to_string()));
+                    edge_list.push(GraphEdge::direct(pn.to_string()));
                 }
             }
 
-            let next_bookmark = maybe_bookmark.or(parent_bookmark);
+            let next_name = maybe_bookmark.map(|b| b.name()).or(parent_name);
 
             if let Some(node) = commit_index.get(commit_id) {
                 for edge in &node.1 {
-                    stack.push((&edge.target, next_bookmark));
+                    stack.push((&edge.target, next_name));
                 }
             }
         }
 
-        registered
+        (nodes, edges)
     }
 
-    fn find_head_bookmarks(nodes: &HashMap<Bookmark, Vec<GraphEdge<String>>>) -> HashSet<Bookmark> {
-        let all_edge_targets: HashSet<&str> = nodes
+    fn find_head_bookmarks(edges: &HashMap<String, Vec<GraphEdge<String>>>) -> HashSet<String> {
+        let all_edge_targets: HashSet<&str> = edges
             .values()
             .flatten()
             .map(|e| e.target.as_str())
             .collect();
 
-        nodes
+        edges
             .keys()
-            .filter(|b| !all_edge_targets.contains(b.name()))
+            .filter(|name| !all_edge_targets.contains(name.as_str()))
             .cloned()
             .collect()
     }

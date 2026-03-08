@@ -44,8 +44,8 @@ fn main() {
         cli::Commands::Submit => {
             let graph = bookmark_graph::BookmarkGraph::new(repo.as_ref(), &workspace, "main")
                 .expect("Failed to build bookmark graph");
-            graph.iter_graph().unwrap().for_each(|b| {
-                println!("{}", b.name());
+            graph.iter_graph().unwrap().for_each(|node| {
+                println!("{} (ascendants: {:?})", node.name(), node.ascendants());
             });
         }
     };

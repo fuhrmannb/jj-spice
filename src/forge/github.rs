@@ -5,7 +5,7 @@ use octocrab::models::pulls::PullRequest;
 use octocrab::models::IssueState;
 use octocrab::Octocrab;
 
-use crate::forge::{ChangeRequest, ChangeStatus, CreateParams, Forge};
+use crate::forge::{BoxFuture, ChangeRequest, ChangeStatus, CreateParams, Forge};
 use crate::protos::change_request::forge_meta::Forge as ForgeOneof;
 use crate::protos::change_request::{ForgeMeta, GitHubMeta};
 
@@ -209,88 +209,108 @@ fn github_cr_from_pr(pr: &PullRequest) -> GitHubChangeRequest {
     }
 }
 
-#[async_trait::async_trait]
 impl Forge for GitHubForge {
-    type Error = GitHubError;
-    type CR = GitHubChangeRequest;
+    fn create<'a>(
+        &'a self,
+        params: CreateParams<'a>,
+    ) -> BoxFuture<'a, Result<Box<dyn ChangeRequest>, Box<dyn std::error::Error>>> {
+        Box::pin(async move {
+            let pulls = self.client.pulls(&self.owner, &self.repo);
+            let builder = pulls
+                .create(params.title, params.source_branch, params.target_branch)
+                .draft(Some(params.is_draft))
+                .body::<String>(params.body.map(String::from));
 
-    async fn create(&self, params: CreateParams<'_>) -> Result<Self::CR, Self::Error> {
-        let pulls = self.client.pulls(&self.owner, &self.repo);
-        let builder = pulls
-            .create(params.title, params.source_branch, params.target_branch)
-            .draft(Some(params.is_draft))
-            .body::<String>(params.body.map(String::from));
-
-        let pr = builder.send().await?;
-        Ok(github_cr_from_pr(&pr))
+            let pr = builder.send().await.map_err(GitHubError::Api)?;
+            Ok(Box::new(github_cr_from_pr(&pr)) as Box<dyn ChangeRequest>)
+        })
     }
 
-    async fn get(&self, meta: &ForgeMeta) -> Result<Self::CR, Self::Error> {
-        let gh = Self::extract_meta(meta)?;
-        let pr = self
-            .client
-            .pulls(&self.owner, &self.repo)
-            .get(gh.number)
-            .await?;
-        Ok(github_cr_from_pr(&pr))
+    fn get<'a>(
+        &'a self,
+        meta: &'a ForgeMeta,
+    ) -> BoxFuture<'a, Result<Box<dyn ChangeRequest>, Box<dyn std::error::Error>>> {
+        Box::pin(async move {
+            let gh = Self::extract_meta(meta)?;
+            let pr = self
+                .client
+                .pulls(&self.owner, &self.repo)
+                .get(gh.number)
+                .await
+                .map_err(GitHubError::Api)?;
+            Ok(Box::new(github_cr_from_pr(&pr)) as Box<dyn ChangeRequest>)
+        })
     }
 
-    async fn find(
-        &self,
-        source_branch: Option<&str>,
-        target_branch: Option<&str>,
-    ) -> Result<Vec<Self::CR>, Self::Error> {
-        let pulls = self.client.pulls(&self.owner, &self.repo);
-        let mut builder = pulls
-            .list()
-            .state(octocrab::params::State::All)
-            .per_page(100);
+    fn find<'a>(
+        &'a self,
+        source_branch: Option<&'a str>,
+        target_branch: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Vec<Box<dyn ChangeRequest>>, Box<dyn std::error::Error>>> {
+        Box::pin(async move {
+            let pulls = self.client.pulls(&self.owner, &self.repo);
+            let mut builder = pulls
+                .list()
+                .state(octocrab::params::State::All)
+                .per_page(100);
 
-        if let Some(head) = source_branch {
-            // GitHub requires "owner:branch" format for the head filter.
-            builder = builder.head(format!("{}:{head}", self.owner));
-        }
-        if let Some(base) = target_branch {
-            builder = builder.base(base);
-        }
+            if let Some(head) = source_branch {
+                // GitHub requires "owner:branch" format for the head filter.
+                builder = builder.head(format!("{}:{head}", self.owner));
+            }
+            if let Some(base) = target_branch {
+                builder = builder.base(base);
+            }
 
-        let page = builder.send().await?;
-        let all_prs = self.client.all_pages(page).await?;
+            let page = builder.send().await.map_err(GitHubError::Api)?;
+            let all_prs = self.client.all_pages(page).await.map_err(GitHubError::Api)?;
 
-        Ok(all_prs.iter().map(github_cr_from_pr).collect())
+            Ok(all_prs
+                .iter()
+                .map(|pr| Box::new(github_cr_from_pr(pr)) as Box<dyn ChangeRequest>)
+                .collect())
+        })
     }
 
-    async fn update(
-        &self,
-        meta: &ForgeMeta,
-        title: Option<&str>,
-        body: Option<&str>,
-    ) -> Result<Self::CR, Self::Error> {
-        let gh = Self::extract_meta(meta)?;
-        let pulls = self.client.pulls(&self.owner, &self.repo);
-        let mut builder = pulls.update(gh.number);
+    fn update<'a>(
+        &'a self,
+        meta: &'a ForgeMeta,
+        title: Option<&'a str>,
+        body: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Box<dyn ChangeRequest>, Box<dyn std::error::Error>>> {
+        Box::pin(async move {
+            let gh = Self::extract_meta(meta)?;
+            let pulls = self.client.pulls(&self.owner, &self.repo);
+            let mut builder = pulls.update(gh.number);
 
-        if let Some(title) = title {
-            builder = builder.title(title);
-        }
-        if let Some(body) = body {
-            builder = builder.body(body);
-        }
+            if let Some(title) = title {
+                builder = builder.title(title);
+            }
+            if let Some(body) = body {
+                builder = builder.body(body);
+            }
 
-        let pr = builder.send().await?;
-        Ok(github_cr_from_pr(&pr))
+            let pr = builder.send().await.map_err(GitHubError::Api)?;
+            Ok(Box::new(github_cr_from_pr(&pr)) as Box<dyn ChangeRequest>)
+        })
     }
 
-    async fn close(&self, meta: &ForgeMeta) -> Result<Self::CR, Self::Error> {
-        let gh = Self::extract_meta(meta)?;
-        let pr = self
-            .client
-            .pulls(&self.owner, &self.repo)
-            .update(gh.number)
-            .state(octocrab::params::pulls::State::Closed)
-            .send()
-            .await?;
-        Ok(github_cr_from_pr(&pr))
+    fn close<'a>(
+        &'a self,
+        meta: &'a ForgeMeta,
+    ) -> BoxFuture<'a, Result<Box<dyn ChangeRequest>, Box<dyn std::error::Error>>> {
+        Box::pin(async move {
+            let gh = Self::extract_meta(meta)?;
+            let pr = self
+                .client
+                .pulls(&self.owner, &self.repo)
+                .update(gh.number)
+                .state(octocrab::params::pulls::State::Closed)
+                .send()
+                .await
+                .map_err(GitHubError::Api)?;
+            Ok(Box::new(github_cr_from_pr(&pr)) as Box<dyn ChangeRequest>)
+        })
     }
 }
 
@@ -564,9 +584,11 @@ mod tests {
             .await;
 
         let forge = mock_forge(&mock_server.uri());
-        let err = forge.get(&github_meta(999)).await.unwrap_err();
+        let Err(err) = forge.get(&github_meta(999)).await else {
+            panic!("expected API error");
+        };
 
-        assert!(matches!(err, GitHubError::Api(_)));
+        assert!(err.downcast_ref::<GitHubError>().is_some());
     }
 
     #[tokio::test]
@@ -671,8 +693,12 @@ mod tests {
         let mock_server = MockServer::start().await;
         let forge = mock_forge(&mock_server.uri());
 
-        let err = forge.get(&meta).await.unwrap_err();
-        assert!(matches!(err, GitHubError::WrongForge));
+        let Err(err) = forge.get(&meta).await else {
+            panic!("expected WrongForge error");
+        };
+        assert!(err
+            .downcast_ref::<GitHubError>()
+            .is_some_and(|e| matches!(e, GitHubError::WrongForge)));
     }
 
     // -- GitHubError Display tests --

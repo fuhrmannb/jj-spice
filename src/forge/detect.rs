@@ -6,16 +6,15 @@ use jj_lib::git::{get_git_repo, UnexpectedGitBackendError};
 use jj_lib::store::Store;
 use thiserror::Error;
 
-/// Detected forge type for a remote.
+use super::github::GitHubForge;
+use super::Forge;
+
+/// Intermediate detection result before constructing a forge client.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ForgeKind {
-    /// A GitHub or GitHub Enterprise remote.
+enum DetectedForge {
     GitHub {
-        /// Repository owner (user or organisation).
         owner: String,
-        /// Repository name (without `.git` suffix).
         repo: String,
-        /// Base URI for the API. `None` means public GitHub.
         base_uri: Option<String>,
     },
 }
@@ -25,19 +24,26 @@ pub enum ForgeKind {
 pub enum ForgeDetectionError {
     #[error("repository is not backed by git")]
     NotGitBacked(#[from] UnexpectedGitBackendError),
+
+    #[error("failed to create {forge_type} forge for remote `{remote}`: {source}")]
+    ForgeCreation {
+        remote: String,
+        forge_type: &'static str,
+        source: Box<dyn std::error::Error>,
+    },
 }
 
-/// Detect the forge type for each git remote in the repository.
+/// Detect the forge type for each git remote and construct a client.
 ///
-/// Returns a map from remote name → [`ForgeKind`]. Remotes whose URLs cannot
-/// be parsed or matched to a known forge are silently skipped.
+/// Returns a map from remote name → [`Forge`] implementation. Remotes whose
+/// URLs cannot be parsed or matched to a known forge are silently skipped.
 ///
 /// GitHub Enterprise hosts are detected via the jj config key
 /// `spice.forges.<hostname>.type = "github"`.
 pub fn detect_forges(
     store: &Store,
     config: &StackedConfig,
-) -> Result<HashMap<String, ForgeKind>, ForgeDetectionError> {
+) -> Result<HashMap<String, Box<dyn Forge>>, ForgeDetectionError> {
     let git_repo = get_git_repo(store)?;
     let mut result = HashMap::new();
 
@@ -62,20 +68,47 @@ pub fn detect_forges(
             None => continue,
         };
 
-        if let Some(kind) = detect_forge_from_host(host, url.path.as_ref(), config) {
-            result.insert(name_str.to_string(), kind);
-        }
+        let detected = match detect_forge_from_host(host, url.path.as_ref(), config) {
+            Some(d) => d,
+            None => continue,
+        };
+
+        let forge = build_forge(name_str, detected)?;
+        result.insert(name_str.to_string(), forge);
     }
 
     Ok(result)
 }
 
-/// Match a hostname + path to a forge type.
+/// Construct a [`Forge`] implementation from a [`DetectedForge`].
+fn build_forge(
+    remote: &str,
+    detected: DetectedForge,
+) -> Result<Box<dyn Forge>, ForgeDetectionError> {
+    match detected {
+        DetectedForge::GitHub {
+            owner,
+            repo,
+            base_uri,
+        } => {
+            let forge = GitHubForge::new(&owner, &repo, base_uri.as_deref()).map_err(|e| {
+                ForgeDetectionError::ForgeCreation {
+                    remote: remote.to_string(),
+                    forge_type: "GitHub",
+                    source: Box::new(e),
+                }
+            })?;
+            Ok(Box::new(forge))
+        }
+    }
+}
+
+/// Match a hostname + path to a detected forge type.
 fn detect_forge_from_host(
     host: &str,
     path: &gix::bstr::BStr,
     config: &StackedConfig,
-) -> Option<ForgeKind> {
+) -> Option<DetectedForge> {
     let path_str = std::str::from_utf8(path.as_ref()).ok()?;
 
     // Check if this host is a known GitHub instance.
@@ -94,7 +127,7 @@ fn detect_forge_from_host(
 
     if is_github {
         let (owner, repo) = parse_owner_repo(path_str)?;
-        return Some(ForgeKind::GitHub {
+        return Some(DetectedForge::GitHub {
             owner,
             repo,
             base_uri,
@@ -185,7 +218,7 @@ mod tests {
         let result = detect_forge_from_host("github.com", "/acme/widget.git".into(), &config);
         assert_eq!(
             result,
-            Some(ForgeKind::GitHub {
+            Some(DetectedForge::GitHub {
                 owner: "acme".into(),
                 repo: "widget".into(),
                 base_uri: None,

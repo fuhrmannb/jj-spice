@@ -3,10 +3,13 @@ pub mod detect;
 /// GitHub / GitHub Enterprise backend.
 pub mod github;
 
+use std::future::Future;
+use std::pin::Pin;
+
 use crate::protos::change_request::ForgeMeta;
 
-use self::detect::ForgeKind;
-use self::github::GitHubForge;
+/// Boxed future type used in [`Forge`] method signatures for dyn-safety.
+type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Status of a change request on a forge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,60 +66,61 @@ pub struct CreateParams<'a> {
     pub is_draft: bool,
 }
 
-/// Trait implemented by each forge backend (GitHub, GitLab, Bitbucket, Gitea, Gerrit).
-#[async_trait::async_trait]
-pub trait Forge {
-    /// Backend-specific error type.
-    type Error;
-    /// Concrete change request type returned by this backend.
-    type CR: ChangeRequest;
-
+/// Object-safe forge backend interface.
+///
+/// Each forge (GitHub, GitLab, Gerrit, ...) implements this trait directly.
+/// Callers work with `&dyn Forge` or `Box<dyn Forge>` — no enums needed.
+///
+/// Methods return boxed futures to ensure dyn-compatibility. Implementations
+/// use `Box::pin(async move { ... })` to build the future.
+pub trait Forge: Send + Sync {
     /// Create a new change request on the forge.
-    async fn create(&self, params: CreateParams<'_>) -> Result<Self::CR, Self::Error>;
+    fn create<'a>(
+        &'a self,
+        params: CreateParams<'a>,
+    ) -> BoxFuture<'a, Result<Box<dyn ChangeRequest>, Box<dyn std::error::Error>>>;
 
     /// Fetch a change request by its stored metadata.
-    async fn get(&self, meta: &ForgeMeta) -> Result<Self::CR, Self::Error>;
+    fn get<'a>(
+        &'a self,
+        meta: &'a ForgeMeta,
+    ) -> BoxFuture<'a, Result<Box<dyn ChangeRequest>, Box<dyn std::error::Error>>>;
 
     /// Find change requests by source and/or target branch.
     ///
     /// Useful for discovering existing CRs on the forge that are not yet
     /// tracked locally.
-    async fn find(
-        &self,
-        source_branch: Option<&str>,
-        target_branch: Option<&str>,
-    ) -> Result<Vec<Self::CR>, Self::Error>;
+    fn find<'a>(
+        &'a self,
+        source_branch: Option<&'a str>,
+        target_branch: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Vec<Box<dyn ChangeRequest>>, Box<dyn std::error::Error>>>;
 
     /// Update the title and/or body of an existing change request.
-    async fn update(
-        &self,
-        meta: &ForgeMeta,
-        title: Option<&str>,
-        body: Option<&str>,
-    ) -> Result<Self::CR, Self::Error>;
+    fn update<'a>(
+        &'a self,
+        meta: &'a ForgeMeta,
+        title: Option<&'a str>,
+        body: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Box<dyn ChangeRequest>, Box<dyn std::error::Error>>>;
 
     /// Close a change request without merging.
-    async fn close(&self, meta: &ForgeMeta) -> Result<Self::CR, Self::Error>;
-}
+    fn close<'a>(
+        &'a self,
+        meta: &'a ForgeMeta,
+    ) -> BoxFuture<'a, Result<Box<dyn ChangeRequest>, Box<dyn std::error::Error>>>;
 
-/// Find change requests on a forge for the given source branch.
-///
-/// Instantiates the appropriate forge backend based on [`ForgeKind`] and
-/// queries for CRs matching `source_branch`. Returns persistable metadata
-/// for each match.
-pub async fn find_change_requests(
-    kind: &ForgeKind,
-    source_branch: &str,
-) -> Result<Vec<ForgeMeta>, Box<dyn std::error::Error>> {
-    match kind {
-        ForgeKind::GitHub {
-            owner,
-            repo,
-            base_uri,
-        } => {
-            let forge = GitHubForge::new(owner, repo, base_uri.as_deref())?;
-            let crs = forge.find(Some(source_branch), None).await?;
+    /// Find change requests matching `source_branch` and return persistable metadata.
+    ///
+    /// This is a convenience wrapper around [`Forge::find`] that extracts
+    /// [`ForgeMeta`] from each result.
+    fn find_change_requests<'a>(
+        &'a self,
+        source_branch: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<ForgeMeta>, Box<dyn std::error::Error>>> {
+        Box::pin(async move {
+            let crs = self.find(Some(source_branch), None).await?;
             Ok(crs.iter().map(|cr| cr.to_forge_meta()).collect())
-        }
+        })
     }
 }

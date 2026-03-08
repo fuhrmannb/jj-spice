@@ -8,7 +8,8 @@ use jj_lib::repo::Repo;
 use crate::bookmark::Bookmark;
 use crate::bookmark_graph::{BookmarkGraph, BookmarkNode};
 use crate::commands::env::SpiceEnv;
-use crate::forge::detect::{ForgeKind, detect_forges};
+use crate::forge::Forge;
+use crate::forge::detect::detect_forges;
 use crate::protos::change_request::ForgeMeta;
 use crate::protos::change_request::forge_meta::Forge as ForgeOneof;
 use crate::store::SpiceStore;
@@ -84,7 +85,7 @@ pub async fn run(
 async fn sync_bookmark(
     ui: &Ui,
     bookmark: &Bookmark,
-    forge_map: &HashMap<String, ForgeKind>,
+    forge_map: &HashMap<String, Box<dyn Forge>>,
 ) -> Result<Option<ForgeMeta>, BookmarkSyncError> {
     let tracked_remotes: Vec<&str> = bookmark.tracked_remotes().collect();
     if tracked_remotes.is_empty() {
@@ -96,13 +97,13 @@ async fn sync_bookmark(
 
     let mut found_forge = false;
     for remote_name in &tracked_remotes {
-        let forge_kind = match forge_map.get(*remote_name) {
-            Some(k) => k,
+        let forge_instance = match forge_map.get(*remote_name) {
+            Some(f) => f,
             None => continue,
         };
         found_forge = true;
 
-        let crs = crate::forge::find_change_requests(forge_kind, bookmark.name()).await?;
+        let crs = forge_instance.find_change_requests(bookmark.name()).await?;
         all_crs.extend(crs);
     }
 

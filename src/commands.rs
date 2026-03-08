@@ -10,9 +10,11 @@ pub mod stack_submit;
 pub mod stack_sync;
 
 use jj_cli::cli_util::RevisionArg;
+use jj_lib::repo::Repo as _;
 
 use cli::{Cli, SpiceCommand, StackCommand, UtilCommand};
 use env::SpiceEnv;
+use crate::forge::detect::detect_forges;
 
 /// Dispatch to the appropriate command.
 ///
@@ -28,7 +30,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         SpiceCommand::Util(util_args) => match util_args.command {
             UtilCommand::Completion(args) => completion::run(args.shell),
         },
-        
+
         SpiceCommand::Stack(stack_args) => {
             let env = SpiceEnv::init(&global_args)?;
 
@@ -47,7 +49,25 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let rt = tokio::runtime::Runtime::new()?;
 
             match stack_args.command {
-                StackCommand::Submit => stack_submit::run(&env, &trunk, &head),
+                StackCommand::Submit => rt.block_on(async {
+                    let detection = detect_forges(env.repo.store(), env.config())?;
+                    let forge = detection
+                        .forges
+                        .into_values()
+                        .next()
+                        .ok_or("no forge detected — is a git remote configured?")?;
+                    let trunk_name = env
+                        .repo
+                        .view()
+                        .bookmarks()
+                        .find(|(_, target)| {
+                            target.local_target.as_normal() == Some(&trunk)
+                        })
+                        .map(|(name, _)| name.as_str().to_string())
+                        .ok_or("no bookmark found at trunk commit")?;
+                    stack_submit::run(&env, forge.as_ref(), &trunk, &head, &trunk_name)
+                        .await
+                }),
                 StackCommand::Sync(sync_args) => {
                     rt.block_on(stack_sync::run(&env, &trunk, &head, sync_args.force))
                 }

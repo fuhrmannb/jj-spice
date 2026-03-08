@@ -38,7 +38,7 @@ impl BookmarkNode {
         self.bookmark.name()
     }
 
-    fn ascendants(&self) -> &[String] {
+    pub fn ascendants(&self) -> &[String] {
         &self.ascendants
     }
 

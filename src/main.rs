@@ -1,6 +1,6 @@
 mod bookmark;
 mod bookmark_graph;
-mod cli;
+mod commands;
 mod forge;
 mod protos;
 mod store;
@@ -17,7 +17,7 @@ use jj_lib::{
 };
 use std::env;
 
-use cli::Cli;
+use commands::cli::Cli;
 
 fn main() {
     let config = setup_config().expect("Failed to load config");
@@ -41,13 +41,7 @@ fn main() {
     let repo = repo_loader.load_at_head().expect("Failed to load repo");
 
     match cli.command {
-        cli::Commands::Submit => {
-            let graph = bookmark_graph::BookmarkGraph::new(repo.as_ref(), &workspace, "main")
-                .expect("Failed to build bookmark graph");
-            graph.iter_graph().unwrap().for_each(|node| {
-                println!("{} (ascendants: {:?})", node.name(), node.ascendants());
-            });
-        }
+        commands::cli::Commands::Submit => commands::submit::run(repo.as_ref(), &workspace),
     };
 }
 

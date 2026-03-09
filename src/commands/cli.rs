@@ -1,6 +1,6 @@
 use clap::builder::styling::AnsiColor;
 use clap::builder::Styles;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Command, Parser, Subcommand};
 use jj_cli::cli_util::GlobalArgs;
 
 /// Colour theme matching jj-cli's help output.
@@ -29,6 +29,8 @@ pub struct Cli {
 pub enum SpiceCommand {
     /// Manage the bookmark stack.
     Stack(StackArgs),
+    /// Miscellaneous utility commands.
+    Util(UtilArgs),
 }
 
 /// Arguments for the `stack` subcommand group.
@@ -54,6 +56,76 @@ pub struct SyncArgs {
     /// Re-discover change requests even for bookmarks that are already tracked.
     #[arg(long)]
     pub force: bool,
+}
+
+/// Arguments for the `util` subcommand group.
+#[derive(Args, Clone, Debug)]
+pub struct UtilArgs {
+    /// The utility operation to perform.
+    #[command(subcommand)]
+    pub command: UtilCommand,
+}
+
+/// Operations available under `jj-spice util`.
+#[derive(Subcommand, Clone, Debug)]
+pub enum UtilCommand {
+    /// Print a command-line-completion script.
+    ///
+    /// Apply it by running one of these:
+    ///
+    /// - Bash: `source <(jj-spice util completion bash)`
+    /// - Fish: `jj-spice util completion fish | source`
+    /// - Nushell:
+    ///      ```nu
+    ///      jj-spice util completion nushell | save -f "completions-jj-spice.nu"
+    ///      use "completions-jj-spice.nu" *
+    ///      ```
+    /// - Zsh:
+    ///      ```shell
+    ///      autoload -U compinit
+    ///      compinit
+    ///      source <(jj-spice util completion zsh)
+    ///      ```
+    Completion(CompletionArgs),
+}
+
+/// Arguments for `jj-spice util completion`.
+#[derive(Args, Clone, Debug)]
+pub struct CompletionArgs {
+    /// The shell to generate completions for.
+    pub shell: ShellCompletion,
+}
+
+/// Supported shells for completion script generation.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ShellCompletion {
+    Bash,
+    Elvish,
+    Fish,
+    Nushell,
+    PowerShell,
+    Zsh,
+}
+
+impl ShellCompletion {
+    /// Generate a completion script for this shell from the given [`Command`].
+    pub fn generate(self, cmd: &mut Command) -> Vec<u8> {
+        use clap_complete::generate;
+        use clap_complete::Shell;
+        use clap_complete_nushell::Nushell;
+
+        let bin_name = "jj-spice";
+        let mut buf = Vec::new();
+        match self {
+            Self::Bash => generate(Shell::Bash, cmd, bin_name, &mut buf),
+            Self::Elvish => generate(Shell::Elvish, cmd, bin_name, &mut buf),
+            Self::Fish => generate(Shell::Fish, cmd, bin_name, &mut buf),
+            Self::Nushell => generate(Nushell, cmd, bin_name, &mut buf),
+            Self::PowerShell => generate(Shell::PowerShell, cmd, bin_name, &mut buf),
+            Self::Zsh => generate(Shell::Zsh, cmd, bin_name, &mut buf),
+        }
+        buf
+    }
 }
 
 #[cfg(test)]
@@ -222,5 +294,105 @@ mod tests {
         assert!(cli.global_args.early_args.color.is_none());
         assert!(cli.global_args.early_args.config.is_empty());
         assert!(cli.global_args.early_args.config_file.is_empty());
+    }
+
+    // ---- Util completion tests ----
+
+    #[test]
+    fn parse_util_completion_bash() {
+        let cli = Cli::try_parse_from(["jj-spice", "util", "completion", "bash"]).unwrap();
+        match cli.command {
+            SpiceCommand::Util(UtilArgs {
+                command: UtilCommand::Completion(args),
+            }) => assert_eq!(args.shell, ShellCompletion::Bash),
+            _ => panic!("expected Util Completion"),
+        }
+    }
+
+    #[test]
+    fn parse_util_completion_zsh() {
+        let cli = Cli::try_parse_from(["jj-spice", "util", "completion", "zsh"]).unwrap();
+        match cli.command {
+            SpiceCommand::Util(UtilArgs {
+                command: UtilCommand::Completion(args),
+            }) => assert_eq!(args.shell, ShellCompletion::Zsh),
+            _ => panic!("expected Util Completion"),
+        }
+    }
+
+    #[test]
+    fn parse_util_completion_fish() {
+        let cli = Cli::try_parse_from(["jj-spice", "util", "completion", "fish"]).unwrap();
+        match cli.command {
+            SpiceCommand::Util(UtilArgs {
+                command: UtilCommand::Completion(args),
+            }) => assert_eq!(args.shell, ShellCompletion::Fish),
+            _ => panic!("expected Util Completion"),
+        }
+    }
+
+    #[test]
+    fn parse_util_completion_nushell() {
+        let cli = Cli::try_parse_from(["jj-spice", "util", "completion", "nushell"]).unwrap();
+        match cli.command {
+            SpiceCommand::Util(UtilArgs {
+                command: UtilCommand::Completion(args),
+            }) => assert_eq!(args.shell, ShellCompletion::Nushell),
+            _ => panic!("expected Util Completion"),
+        }
+    }
+
+    #[test]
+    fn parse_util_completion_elvish() {
+        let cli = Cli::try_parse_from(["jj-spice", "util", "completion", "elvish"]).unwrap();
+        match cli.command {
+            SpiceCommand::Util(UtilArgs {
+                command: UtilCommand::Completion(args),
+            }) => assert_eq!(args.shell, ShellCompletion::Elvish),
+            _ => panic!("expected Util Completion"),
+        }
+    }
+
+    #[test]
+    fn parse_util_completion_powershell() {
+        let cli = Cli::try_parse_from(["jj-spice", "util", "completion", "power-shell"]).unwrap();
+        match cli.command {
+            SpiceCommand::Util(UtilArgs {
+                command: UtilCommand::Completion(args),
+            }) => assert_eq!(args.shell, ShellCompletion::PowerShell),
+            _ => panic!("expected Util Completion"),
+        }
+    }
+
+    #[test]
+    fn parse_util_completion_missing_shell_fails() {
+        assert!(Cli::try_parse_from(["jj-spice", "util", "completion"]).is_err());
+    }
+
+    #[test]
+    fn parse_util_completion_invalid_shell_fails() {
+        assert!(Cli::try_parse_from(["jj-spice", "util", "completion", "tcsh"]).is_err());
+    }
+
+    #[test]
+    fn generate_completion_scripts_are_non_empty() {
+        use clap::CommandFactory;
+        for shell in [
+            ShellCompletion::Bash,
+            ShellCompletion::Elvish,
+            ShellCompletion::Fish,
+            ShellCompletion::Nushell,
+            ShellCompletion::PowerShell,
+            ShellCompletion::Zsh,
+        ] {
+            let mut cmd = Cli::command();
+            let buf = shell.generate(&mut cmd);
+            assert!(!buf.is_empty(), "{shell:?} completion script is empty");
+            let script = String::from_utf8_lossy(&buf);
+            assert!(
+                script.contains("jj-spice"),
+                "{shell:?} completion script should reference jj-spice"
+            );
+        }
     }
 }

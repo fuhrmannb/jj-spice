@@ -7,7 +7,6 @@ mod store;
 use clap::Parser;
 
 use commands::cli::Cli;
-use commands::env::SpiceEnv;
 
 fn main() {
     if let Err(e) = try_main() {
@@ -18,6 +17,5 @@ fn main() {
 
 fn try_main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    let env = SpiceEnv::init(&cli.global_args)?;
-    commands::run(cli, &env)
+    commands::run(cli)
 }

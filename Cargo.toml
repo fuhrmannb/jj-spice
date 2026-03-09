@@ -9,6 +9,8 @@ edition = "2024"
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4.5.60", features = ["derive"] }
+clap_complete = "4.5"
+clap_complete_nushell = "4.5"
 dunce = "1"
 gix = { version = "0.78.0", default-features = false }
 jj-cli = "0.38.0"

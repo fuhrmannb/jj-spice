@@ -18,6 +18,6 @@ fn main() {
 
 fn try_main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    let env = SpiceEnv::init()?;
+    let env = SpiceEnv::init(&cli.global_args)?;
     commands::run(cli, &env)
 }

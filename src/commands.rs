@@ -4,6 +4,8 @@ pub mod cli;
 mod completion;
 /// Shared environment bootstrapped from the jj config and workspace.
 pub(crate) mod env;
+/// `stack log` command implementation.
+mod stack_log;
 /// `stack submit` command implementation.
 pub mod stack_submit;
 /// `stack sync` command implementation.
@@ -49,6 +51,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let rt = tokio::runtime::Runtime::new()?;
 
             match stack_args.command {
+                StackCommand::Log => rt.block_on(stack_log::run(&env, &trunk, &head)),
                 StackCommand::Submit => rt.block_on(async {
                     let detection = detect_forges(env.repo.store(), env.config())?;
                     let forge = detection

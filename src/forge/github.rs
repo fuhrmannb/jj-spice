@@ -1,9 +1,9 @@
 use std::fmt;
 use std::process::Command;
 
-use octocrab::models::pulls::PullRequest;
-use octocrab::models::IssueState;
 use octocrab::Octocrab;
+use octocrab::models::IssueState;
+use octocrab::models::pulls::PullRequest;
 use url::Url;
 
 use crate::forge::{BoxFuture, ChangeRequest, ChangeStatus, CreateParams, Forge};
@@ -164,11 +164,7 @@ impl GitHubForge {
     ///
     /// Used in tests to inject a client pointed at a mock server.
     #[cfg(test)]
-    fn with_client(
-        client: Octocrab,
-        owner: impl Into<String>,
-        repo: impl Into<String>,
-    ) -> Self {
+    fn with_client(client: Octocrab, owner: impl Into<String>, repo: impl Into<String>) -> Self {
         Self {
             client,
             owner: owner.into(),
@@ -283,7 +279,11 @@ impl Forge for GitHubForge {
             }
 
             let page = builder.send().await.map_err(GitHubError::Api)?;
-            let all_prs = self.client.all_pages(page).await.map_err(GitHubError::Api)?;
+            let all_prs = self
+                .client
+                .all_pages(page)
+                .await
+                .map_err(GitHubError::Api)?;
 
             Ok(all_prs
                 .iter()
@@ -414,10 +414,7 @@ mod tests {
 
     #[test]
     fn url_returns_html_url() {
-        assert_eq!(
-            sample_cr().url(),
-            "https://github.com/owner/repo/pull/42"
-        );
+        assert_eq!(sample_cr().url(), "https://github.com/owner/repo/pull/42");
     }
 
     #[test]
@@ -551,7 +548,9 @@ mod tests {
         let mock_server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path(format!("/repos/{OWNER}/{REPO}/pulls/42")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(pr_json(42, "open", false, false)))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(pr_json(42, "open", false, false)),
+            )
             .mount(&mock_server)
             .await;
 
@@ -571,7 +570,9 @@ mod tests {
         let mock_server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path(format!("/repos/{OWNER}/{REPO}/pulls/10")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(pr_json(10, "closed", false, true)))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(pr_json(10, "closed", false, true)),
+            )
             .mount(&mock_server)
             .await;
 
@@ -586,7 +587,9 @@ mod tests {
         let mock_server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path(format!("/repos/{OWNER}/{REPO}/pulls/11")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(pr_json(11, "closed", false, false)))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(pr_json(11, "closed", false, false)),
+            )
             .mount(&mock_server)
             .await;
 
@@ -636,7 +639,9 @@ mod tests {
         let mock_server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path(format!("/repos/{OWNER}/{REPO}/pulls")))
-            .respond_with(ResponseTemplate::new(201).set_body_json(pr_json(55, "open", false, false)))
+            .respond_with(
+                ResponseTemplate::new(201).set_body_json(pr_json(55, "open", false, false)),
+            )
             .mount(&mock_server)
             .await;
 
@@ -699,7 +704,9 @@ mod tests {
         let mock_server = MockServer::start().await;
         Mock::given(method("PATCH"))
             .and(path(format!("/repos/{OWNER}/{REPO}/pulls/42")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(pr_json(42, "open", false, false)))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(pr_json(42, "open", false, false)),
+            )
             .mount(&mock_server)
             .await;
 
@@ -717,7 +724,9 @@ mod tests {
         let mock_server = MockServer::start().await;
         Mock::given(method("PATCH"))
             .and(path(format!("/repos/{OWNER}/{REPO}/pulls/42")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(pr_json(42, "closed", false, false)))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(pr_json(42, "closed", false, false)),
+            )
             .mount(&mock_server)
             .await;
 
@@ -736,9 +745,10 @@ mod tests {
         let Err(err) = forge.get(&meta).await else {
             panic!("expected WrongForge error");
         };
-        assert!(err
-            .downcast_ref::<GitHubError>()
-            .is_some_and(|e| matches!(e, GitHubError::WrongForge)));
+        assert!(
+            err.downcast_ref::<GitHubError>()
+                .is_some_and(|e| matches!(e, GitHubError::WrongForge))
+        );
     }
 
     // -- GitHubError Display tests --

@@ -44,6 +44,8 @@ pub struct StackArgs {
 /// Operations available under `jj-spice stack`.
 #[derive(Subcommand, Clone, Debug)]
 pub enum StackCommand {
+    /// Show the bookmark DAG with change request status.
+    Log,
     /// Submit the current stack of bookmarks for review.
     Submit,
     /// Discover and track existing change requests for bookmarks in the stack.
@@ -132,6 +134,17 @@ impl ShellCompletion {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn parse_stack_log() {
+        let cli = Cli::try_parse_from(["jj-spice", "stack", "log"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            SpiceCommand::Stack(StackArgs {
+                command: StackCommand::Log
+            })
+        ));
+    }
 
     #[test]
     fn parse_stack_submit() {

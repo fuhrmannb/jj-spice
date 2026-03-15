@@ -2,11 +2,10 @@
 # https://embarkstudios.github.io/cargo-deny/
 
 [advisories]
-# Threshold for security vulnerabilities.
-vulnerability = "deny"
-unmaintained = "warn"
+# Vulnerability and unsound advisories always emit errors (no longer configurable).
+# Unmaintained advisories: only fail for direct workspace dependencies.
+unmaintained = "workspace"
 yanked = "warn"
-notice = "warn"
 
 [licenses]
 # Allow common permissive licenses.

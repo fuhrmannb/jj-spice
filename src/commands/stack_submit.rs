@@ -1,3 +1,4 @@
+use std::fs::write;
 use std::io::Write as _;
 
 use jj_cli::description_util::TextEditor;
@@ -30,8 +31,7 @@ pub async fn run(
         let ascendants = bookmark_node.ascendants();
 
         // If the change request already exists, retarget if needed.
-        let existing =
-            get_existing_change_request(&env.ui, &state, forge, bookmark.name()).await?;
+        let existing = get_existing_change_request(&env.ui, &state, forge, bookmark.name()).await?;
 
         let base_bookmark = match ascendants.len() {
             0 => trunk_name,
@@ -139,16 +139,26 @@ async fn get_existing_change_request(
         _ => {
             writeln!(
                 ui.warning_default(),
-                "{}: found {} change requests on the forge",
-                bookmark,
+                "{bookmark}: found {} change requests on the forge",
                 metas.len()
             )?;
             for (i, meta) in metas.iter().enumerate() {
                 writeln!(ui.stdout_formatter(), "  {i}: {meta}")?;
             }
+            writeln!(ui.stdout_formatter(), "  n: Create a new change request")?;
 
-            let choices: Vec<String> = (0..metas.len()).map(|i| i.to_string()).collect();
+            let choices: Vec<String> = (0..metas.len())
+                .map(|i| i.to_string())
+                .chain(std::iter::once("n".into()))
+                .collect();
+
             let index = ui.prompt_choice("Select change request", &choices, Some(0))?;
+
+            // If the user selected "n", create a new change request.
+            // Pretending no change request was found.
+            if index == metas.len() {
+                return Ok(None);
+            }
 
             Ok(Some(metas.into_iter().nth(index).unwrap()))
         }

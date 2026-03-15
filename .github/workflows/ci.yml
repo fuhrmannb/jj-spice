@@ -44,6 +44,9 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
       - name: Install mold linker
         if: runner.os == 'Linux'
         uses: rui314/setup-mold@v1
@@ -75,6 +78,9 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
 
       - name: Install mold linker
         uses: rui314/setup-mold@v1
@@ -140,6 +146,9 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
 
       - name: Install mold linker
         uses: rui314/setup-mold@v1

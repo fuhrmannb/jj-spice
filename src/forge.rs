@@ -11,6 +11,12 @@ use crate::protos::change_request::ForgeMeta;
 /// Boxed future type used in [`Forge`] method signatures for dyn-safety.
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
+/// Shorthand for a single change-request result returned by [`Forge`] methods.
+type ForgeResult = Result<Box<dyn ChangeRequest>, Box<dyn std::error::Error>>;
+
+/// Shorthand for a multi change-request result returned by [`Forge::find`].
+type ForgeResults = Result<Vec<Box<dyn ChangeRequest>>, Box<dyn std::error::Error>>;
+
 /// Status of a change request on a forge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChangeStatus {
@@ -85,13 +91,13 @@ pub trait Forge: Send + Sync {
     fn create<'a>(
         &'a self,
         params: CreateParams<'a>,
-    ) -> BoxFuture<'a, Result<Box<dyn ChangeRequest>, Box<dyn std::error::Error>>>;
+    ) -> BoxFuture<'a, ForgeResult>;
 
     /// Fetch a change request by its stored metadata.
     fn get<'a>(
         &'a self,
         meta: &'a ForgeMeta,
-    ) -> BoxFuture<'a, Result<Box<dyn ChangeRequest>, Box<dyn std::error::Error>>>;
+    ) -> BoxFuture<'a, ForgeResult>;
 
     /// Find change requests by source and/or target branch.
     ///
@@ -101,7 +107,7 @@ pub trait Forge: Send + Sync {
         &'a self,
         source_branch: Option<&'a str>,
         target_branch: Option<&'a str>,
-    ) -> BoxFuture<'a, Result<Vec<Box<dyn ChangeRequest>>, Box<dyn std::error::Error>>>;
+    ) -> BoxFuture<'a, ForgeResults>;
 
     /// Update the title and/or body of an existing change request.
     fn update<'a>(
@@ -109,7 +115,7 @@ pub trait Forge: Send + Sync {
         meta: &'a ForgeMeta,
         title: Option<&'a str>,
         body: Option<&'a str>,
-    ) -> BoxFuture<'a, Result<Box<dyn ChangeRequest>, Box<dyn std::error::Error>>>;
+    ) -> BoxFuture<'a, ForgeResult>;
 
     /// Update the target (base) branch of an existing change request.
     ///
@@ -119,7 +125,7 @@ pub trait Forge: Send + Sync {
         &'a self,
         meta: &'a ForgeMeta,
         base_branch: &'a str,
-    ) -> BoxFuture<'a, Result<Box<dyn ChangeRequest>, Box<dyn std::error::Error>>> {
+    ) -> BoxFuture<'a, ForgeResult> {
         let _ = (meta, base_branch);
         Box::pin(async { Err("this forge does not support updating the base branch".into()) })
     }
@@ -128,7 +134,7 @@ pub trait Forge: Send + Sync {
     fn close<'a>(
         &'a self,
         meta: &'a ForgeMeta,
-    ) -> BoxFuture<'a, Result<Box<dyn ChangeRequest>, Box<dyn std::error::Error>>>;
+    ) -> BoxFuture<'a, ForgeResult>;
 
     /// Find change requests matching `source_branch` and return persistable metadata.
     ///

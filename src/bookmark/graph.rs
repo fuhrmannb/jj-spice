@@ -12,6 +12,13 @@ use thiserror::Error;
 
 use super::{Bookmark, RemoteTracking};
 
+/// Nodes keyed by bookmark name and their outgoing edges, as built by
+/// [`BookmarkGraph::build_bookmark_graph`].
+type BookmarkGraphParts = (
+    HashMap<String, BookmarkNode>,
+    HashMap<String, Vec<GraphEdge<String>>>,
+);
+
 /// A node in the bookmark DAG, wrapping a [`Bookmark`] with ancestry info.
 #[derive(Clone, Debug)]
 pub struct BookmarkNode {
@@ -175,10 +182,7 @@ impl BookmarkGraph {
     fn build_bookmark_graph(
         reversed: &[GraphNode<CommitId>],
         bookmarks_per_commit: &HashMap<CommitId, Bookmark>,
-    ) -> (
-        HashMap<String, BookmarkNode>,
-        HashMap<String, Vec<GraphEdge<String>>>,
-    ) {
+    ) -> BookmarkGraphParts {
         let commit_index: HashMap<&CommitId, &GraphNode<CommitId>> =
             reversed.iter().map(|node| (&node.0, node)).collect();
 

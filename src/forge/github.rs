@@ -6,7 +6,9 @@ use octocrab::models::IssueState;
 use octocrab::models::pulls::PullRequest;
 use url::Url;
 
-use crate::forge::{BoxFuture, ChangeRequest, ChangeStatus, CreateParams, Forge};
+use crate::forge::{
+    BoxFuture, ChangeRequest, ChangeStatus, CreateParams, Forge, ForgeResult, ForgeResults,
+};
 use crate::protos::change_request::forge_meta::Forge as ForgeOneof;
 use crate::protos::change_request::{ForgeMeta, GitHubMeta};
 
@@ -229,7 +231,7 @@ impl Forge for GitHubForge {
     fn create<'a>(
         &'a self,
         params: CreateParams<'a>,
-    ) -> BoxFuture<'a, Result<Box<dyn ChangeRequest>, Box<dyn std::error::Error>>> {
+    ) -> BoxFuture<'a, ForgeResult> {
         Box::pin(async move {
             let pulls = self.client.pulls(&self.owner, &self.repo);
             let builder = pulls
@@ -245,7 +247,7 @@ impl Forge for GitHubForge {
     fn get<'a>(
         &'a self,
         meta: &'a ForgeMeta,
-    ) -> BoxFuture<'a, Result<Box<dyn ChangeRequest>, Box<dyn std::error::Error>>> {
+    ) -> BoxFuture<'a, ForgeResult> {
         Box::pin(async move {
             let gh = Self::extract_meta(meta)?;
             let pr = self
@@ -262,7 +264,7 @@ impl Forge for GitHubForge {
         &'a self,
         source_branch: Option<&'a str>,
         target_branch: Option<&'a str>,
-    ) -> BoxFuture<'a, Result<Vec<Box<dyn ChangeRequest>>, Box<dyn std::error::Error>>> {
+    ) -> BoxFuture<'a, ForgeResults> {
         Box::pin(async move {
             let pulls = self.client.pulls(&self.owner, &self.repo);
             let mut builder = pulls
@@ -297,7 +299,7 @@ impl Forge for GitHubForge {
         meta: &'a ForgeMeta,
         title: Option<&'a str>,
         body: Option<&'a str>,
-    ) -> BoxFuture<'a, Result<Box<dyn ChangeRequest>, Box<dyn std::error::Error>>> {
+    ) -> BoxFuture<'a, ForgeResult> {
         Box::pin(async move {
             let gh = Self::extract_meta(meta)?;
             let pulls = self.client.pulls(&self.owner, &self.repo);
@@ -319,7 +321,7 @@ impl Forge for GitHubForge {
         &'a self,
         meta: &'a ForgeMeta,
         base_branch: &'a str,
-    ) -> BoxFuture<'a, Result<Box<dyn ChangeRequest>, Box<dyn std::error::Error>>> {
+    ) -> BoxFuture<'a, ForgeResult> {
         Box::pin(async move {
             let gh = Self::extract_meta(meta)?;
             let pr = self
@@ -337,7 +339,7 @@ impl Forge for GitHubForge {
     fn close<'a>(
         &'a self,
         meta: &'a ForgeMeta,
-    ) -> BoxFuture<'a, Result<Box<dyn ChangeRequest>, Box<dyn std::error::Error>>> {
+    ) -> BoxFuture<'a, ForgeResult> {
         Box::pin(async move {
             let gh = Self::extract_meta(meta)?;
             let pr = self

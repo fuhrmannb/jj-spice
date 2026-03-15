@@ -226,16 +226,13 @@ mod tests {
     #[test]
     fn parse_no_pager_flag() {
         let cli = Cli::try_parse_from(["jj-spice", "--no-pager", "stack", "submit"]).unwrap();
-        assert_eq!(
-            cli.global_args.early_args.no_pager.unwrap_or_default(),
-            true
-        );
+        assert!(cli.global_args.early_args.no_pager.unwrap_or_default());
     }
 
     #[test]
     fn parse_quiet_flag() {
         let cli = Cli::try_parse_from(["jj-spice", "--quiet", "stack", "submit"]).unwrap();
-        assert_eq!(cli.global_args.early_args.quiet.unwrap_or_default(), true);
+        assert!(cli.global_args.early_args.quiet.unwrap_or_default());
     }
 
     #[test]
@@ -290,10 +287,7 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(cli.global_args.repository.as_deref(), Some("/tmp/repo"));
-        assert_eq!(
-            cli.global_args.early_args.no_pager.unwrap_or_default(),
-            true
-        );
+        assert!(cli.global_args.early_args.no_pager.unwrap_or_default());
     }
 
     #[test]

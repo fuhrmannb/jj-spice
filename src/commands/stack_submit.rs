@@ -1,4 +1,3 @@
-use std::fs::write;
 use std::io::Write as _;
 
 use jj_cli::description_util::TextEditor;

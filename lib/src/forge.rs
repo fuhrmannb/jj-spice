@@ -20,6 +20,8 @@ type ForgeResults = Result<Vec<Box<dyn ChangeRequest>>, Box<dyn std::error::Erro
 /// Status of a change request on a forge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChangeStatus {
+    /// Draft, not yet ready for review.
+    Draft,
     /// Active and accepting updates.
     Open,
     /// Closed without merging.
@@ -60,9 +62,6 @@ pub trait ChangeRequest {
 
     /// Longer description. `None` when the forge has no description set.
     fn body(&self) -> Option<&str>;
-
-    /// Whether the CR is a draft / work-in-progress.
-    fn is_draft(&self) -> bool;
 }
 
 /// Input parameters for creating a change request on a forge.

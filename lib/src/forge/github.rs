@@ -79,7 +79,6 @@ pub struct GitHubChangeRequest {
     pub title: String,
     pub body: Option<String>,
     pub status: ChangeStatus,
-    pub is_draft: bool,
     pub url: String,
 }
 
@@ -108,10 +107,6 @@ impl ChangeRequest for GitHubChangeRequest {
 
     fn body(&self) -> Option<&str> {
         self.body.as_deref()
-    }
-
-    fn is_draft(&self) -> bool {
-        self.is_draft
     }
 
     fn link_label(&self) -> String {
@@ -187,9 +182,10 @@ impl GitHubForge {
 
 /// Build a [`GitHubChangeRequest`] from an octocrab [`PullRequest`] response.
 fn github_cr_from_pr(pr: &PullRequest, host: &str) -> GitHubChangeRequest {
-    let status = match (&pr.state, pr.merged_at.is_some()) {
-        (_, true) => ChangeStatus::Merged,
-        (Some(IssueState::Closed), false) => ChangeStatus::Closed,
+    let status = match (&pr.state, pr.merged_at.is_some(), pr.draft) {
+        (_, true, _) => ChangeStatus::Merged,
+        (Some(IssueState::Closed), false, _) => ChangeStatus::Closed,
+        (Some(IssueState::Open), false, Some(true)) => ChangeStatus::Draft,
         _ => ChangeStatus::Open,
     };
 
@@ -218,7 +214,6 @@ fn github_cr_from_pr(pr: &PullRequest, host: &str) -> GitHubChangeRequest {
         title: pr.title.clone().unwrap_or_default(),
         body: pr.body.clone(),
         status,
-        is_draft: pr.draft.unwrap_or(false),
         url: pr
             .html_url
             .as_ref()
@@ -365,7 +360,6 @@ mod tests {
             title: "Add feature X".into(),
             body: Some("Detailed description".into()),
             status: ChangeStatus::Open,
-            is_draft: false,
             url: "https://github.com/owner/repo/pull/42".into(),
         }
     }
@@ -425,18 +419,6 @@ mod tests {
         let mut cr = sample_cr();
         cr.body = None;
         assert_eq!(cr.body(), None);
-    }
-
-    #[test]
-    fn is_draft_returns_false_by_default() {
-        assert!(!sample_cr().is_draft());
-    }
-
-    #[test]
-    fn is_draft_returns_true_when_set() {
-        let mut cr = sample_cr();
-        cr.is_draft = true;
-        assert!(cr.is_draft());
     }
 
     // -- extract_meta tests --
@@ -554,7 +536,6 @@ mod tests {
         assert_eq!(cr.title(), "PR #42");
         assert_eq!(cr.body(), Some("A test pull request"));
         assert_eq!(cr.status(), ChangeStatus::Open);
-        assert!(!cr.is_draft());
         assert!(cr.url().contains("/pull/42"));
     }
 
@@ -604,7 +585,7 @@ mod tests {
         let forge = mock_forge(&mock_server.uri());
         let cr = forge.get(&github_meta(7)).await.unwrap();
 
-        assert!(cr.is_draft());
+        assert_eq!(cr.status(), ChangeStatus::Draft);
     }
 
     #[tokio::test]

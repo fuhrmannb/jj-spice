@@ -291,7 +291,7 @@ fn render_node_text(
         // Live CR data available.
         (Some(_), Some(Ok(cr))) => {
             write!(fmt, " ")?;
-            render_status_pill(fmt, Some(cr.status()), cr.is_draft())?;
+            render_status_pill(fmt, Some(cr.status()))?;
             write!(fmt, " ")?;
             write_hyperlink(fmt, cr.url(), &cr.link_label())?;
         }
@@ -299,7 +299,7 @@ fn render_node_text(
         (Some(meta), Some(Err(_))) => {
             let id = format_meta_id(meta);
             write!(fmt, " ")?;
-            render_status_pill(fmt, None, false)?;
+            render_status_pill(fmt, None)?;
             write!(fmt, " ")?;
             fmt.push_label("cr_id");
             write!(fmt, "#{id}")?;
@@ -309,7 +309,7 @@ fn render_node_text(
         (Some(meta), None) => {
             let id = format_meta_id(meta);
             write!(fmt, " ")?;
-            render_status_pill(fmt, None, false)?;
+            render_status_pill(fmt, None)?;
             write!(fmt, " ")?;
             fmt.push_label("cr_id");
             write!(fmt, "#{id}")?;
@@ -381,24 +381,16 @@ fn write_hyperlink(fmt: &mut dyn Formatter, url: &str, text: &str) -> std::io::R
 /// - Left cap: fg = pill color, default bg → `"status_<x> cap"` label
 /// - Inner text: fg = white, bg = pill color, bold → `"status_<x>"` label
 /// - Right cap: same as left cap
-///
-/// When `is_draft` is true, the pill shows "Draft" with a grey background
-/// regardless of the underlying status. When `status` is `None`, renders
-/// an "unknown" pill for cases where the forge API was unreachable.
 fn render_status_pill(
     fmt: &mut dyn Formatter,
     status: Option<ChangeStatus>,
-    is_draft: bool,
 ) -> std::io::Result<()> {
-    let (label, text) = if is_draft {
-        ("status_draft", "Draft")
-    } else {
-        match status {
-            Some(ChangeStatus::Open) => ("status_open", "Open"),
-            Some(ChangeStatus::Closed) => ("status_closed", "Closed"),
-            Some(ChangeStatus::Merged) => ("status_merged", "Merged"),
-            None => ("status_unknown", "?"),
-        }
+    let (label, text) = match status {
+        Some(ChangeStatus::Open) => ("status_open", "Open"),
+        Some(ChangeStatus::Closed) => ("status_closed", "Closed"),
+        Some(ChangeStatus::Merged) => ("status_merged", "Merged"),
+        Some(ChangeStatus::Draft) => ("status_draft", "Draft"),
+        None => ("status_unknown", "?"),
     };
 
     // Left cap: colored glyph on default background.
@@ -469,43 +461,43 @@ mod tests {
 
     // -- render_status_pill tests (plain text, no color) --
 
-    fn render_pill_plain(status: Option<ChangeStatus>, is_draft: bool) -> String {
+    fn render_pill_plain(status: Option<ChangeStatus>) -> String {
         let factory = jj_cli::formatter::FormatterFactory::plain_text();
         let mut buf = Vec::new();
         {
             let mut fmt = factory.new_formatter(&mut buf);
-            render_status_pill(&mut *fmt, status, is_draft).unwrap();
+            render_status_pill(&mut *fmt, status).unwrap();
         }
         String::from_utf8(buf).unwrap()
     }
 
     #[test]
     fn pill_open_plain_text() {
-        let text = render_pill_plain(Some(ChangeStatus::Open), false);
+        let text = render_pill_plain(Some(ChangeStatus::Open));
         assert_eq!(text, format!("{PILL_LEFT} Open {PILL_RIGHT}"));
     }
 
     #[test]
     fn pill_draft_plain_text() {
-        let text = render_pill_plain(Some(ChangeStatus::Open), true);
+        let text = render_pill_plain(Some(ChangeStatus::Draft));
         assert_eq!(text, format!("{PILL_LEFT} Draft {PILL_RIGHT}"));
     }
 
     #[test]
     fn pill_closed_plain_text() {
-        let text = render_pill_plain(Some(ChangeStatus::Closed), false);
+        let text = render_pill_plain(Some(ChangeStatus::Closed));
         assert_eq!(text, format!("{PILL_LEFT} Closed {PILL_RIGHT}"));
     }
 
     #[test]
     fn pill_merged_plain_text() {
-        let text = render_pill_plain(Some(ChangeStatus::Merged), false);
+        let text = render_pill_plain(Some(ChangeStatus::Merged));
         assert_eq!(text, format!("{PILL_LEFT} Merged {PILL_RIGHT}"));
     }
 
     #[test]
     fn pill_unknown_plain_text() {
-        let text = render_pill_plain(None, false);
+        let text = render_pill_plain(None);
         assert_eq!(text, format!("{PILL_LEFT} ? {PILL_RIGHT}"));
     }
 
@@ -569,7 +561,6 @@ mod tests {
                 title: "Add cool feature".into(),
                 body: None,
                 status: ChangeStatus::Open,
-                is_draft: false,
                 url: "https://github.com/owner/repo/pull/1".into(),
             })),
         );
@@ -619,8 +610,7 @@ mod tests {
                 host: "github.com".into(),
                 title: "WIP thing".into(),
                 body: None,
-                status: ChangeStatus::Open,
-                is_draft: true,
+                status: ChangeStatus::Draft,
                 url: "https://github.com/o/r/pull/5".into(),
             })),
         );

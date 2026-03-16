@@ -6,6 +6,9 @@
 # Unmaintained advisories: only fail for direct workspace dependencies.
 unmaintained = "workspace"
 yanked = "warn"
+ignore = [
+    "RUSTSEC-2023-0071" # No patch is yet available
+]
 
 [licenses]
 # Allow common permissive licenses.

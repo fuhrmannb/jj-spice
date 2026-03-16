@@ -1,3 +1,6 @@
+use gix::remote;
+use jj_lib::op_store::LocalRemoteRefTarget;
+
 /// DAG of bookmarks between trunk and head for stack operations.
 pub mod graph;
 
@@ -15,37 +18,44 @@ pub struct RemoteTracking {
 /// `Hash` and `Eq` are derived from `name` only so that a bookmark's identity
 /// in sets and maps is unaffected by its remote refs.
 #[derive(Clone, Debug)]
-pub struct Bookmark {
+pub struct Bookmark<'a> {
     name: String,
+    ref_target: LocalRemoteRefTarget<'a>,
     remotes: Vec<RemoteTracking>,
 }
 
-impl PartialEq for Bookmark {
+impl PartialEq for Bookmark<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name
     }
 }
 
-impl Eq for Bookmark {}
+impl Eq for Bookmark<'_> {}
 
-impl std::hash::Hash for Bookmark {
+impl std::hash::Hash for Bookmark<'_> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.name.hash(state);
     }
 }
 
-impl Bookmark {
+impl<'a> Bookmark<'a> {
     /// Create a bookmark with the given name and no remote tracking refs.
-    pub fn new(name: String) -> Self {
+    pub fn new(name: String, ref_target: LocalRemoteRefTarget<'a>) -> Self {
+        let remotes = ref_target
+            .clone()
+            .remote_refs
+            .iter()
+            .map(|(remote_name, remote_ref)| RemoteTracking {
+                remote_name: remote_name.as_str().to_string(),
+                is_tracked: remote_ref.is_tracked(),
+            })
+            .collect();
+
         Self {
             name,
-            remotes: Vec::new(),
+            ref_target,
+            remotes,
         }
-    }
-
-    /// Create a bookmark with the given name and pre-populated remote tracking refs.
-    pub fn with_remotes(name: String, remotes: Vec<RemoteTracking>) -> Self {
-        Self { name, remotes }
     }
 
     /// The local bookmark name.
@@ -70,26 +80,47 @@ impl Bookmark {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jj_lib::op_store::{LocalRemoteRefTarget, RefTarget, RemoteRef, RemoteRefState};
+    use jj_lib::ref_name::RemoteName;
     use std::collections::HashSet;
 
-    fn remote(name: &str, tracked: bool) -> RemoteTracking {
-        RemoteTracking {
-            remote_name: name.to_string(),
-            is_tracked: tracked,
+    fn absent_target() -> LocalRemoteRefTarget<'static> {
+        LocalRemoteRefTarget {
+            local_target: RefTarget::absent_ref(),
+            remote_refs: vec![],
+        }
+    }
+
+    fn make_remote_ref(tracked: bool) -> RemoteRef {
+        RemoteRef {
+            target: RefTarget::absent(),
+            state: if tracked {
+                RemoteRefState::Tracked
+            } else {
+                RemoteRefState::New
+            },
         }
     }
 
     #[test]
     fn new_creates_bookmark_with_empty_remotes() {
-        let b = Bookmark::new("feat".into());
+        let b = Bookmark::new("feat".into(), absent_target());
         assert_eq!(b.name(), "feat");
         assert!(b.remotes().is_empty());
     }
 
     #[test]
-    fn with_remotes_stores_provided_remotes() {
-        let remotes = vec![remote("origin", true), remote("upstream", false)];
-        let b = Bookmark::with_remotes("feat".into(), remotes);
+    fn new_populates_remotes_from_ref_target() {
+        let origin_ref = make_remote_ref(true);
+        let upstream_ref = make_remote_ref(false);
+        let target = LocalRemoteRefTarget {
+            local_target: RefTarget::absent_ref(),
+            remote_refs: vec![
+                (RemoteName::new("origin"), &origin_ref),
+                (RemoteName::new("upstream"), &upstream_ref),
+            ],
+        };
+        let b = Bookmark::new("feat".into(), target);
         assert_eq!(b.remotes().len(), 2);
         assert_eq!(b.remotes()[0].remote_name, "origin");
         assert!(b.remotes()[0].is_tracked);
@@ -99,47 +130,89 @@ mod tests {
 
     #[test]
     fn tracked_remotes_filters_to_tracked_only() {
-        let remotes = vec![
-            remote("origin", true),
-            remote("upstream", false),
-            remote("fork", true),
-        ];
-        let b = Bookmark::with_remotes("feat".into(), remotes);
+        let origin_ref = make_remote_ref(true);
+        let upstream_ref = make_remote_ref(false);
+        let fork_ref = make_remote_ref(true);
+        let target = LocalRemoteRefTarget {
+            local_target: RefTarget::absent_ref(),
+            remote_refs: vec![
+                (RemoteName::new("origin"), &origin_ref),
+                (RemoteName::new("upstream"), &upstream_ref),
+                (RemoteName::new("fork"), &fork_ref),
+            ],
+        };
+        let b = Bookmark::new("feat".into(), target);
         let tracked: Vec<&str> = b.tracked_remotes().collect();
         assert_eq!(tracked, vec!["origin", "fork"]);
     }
 
     #[test]
     fn tracked_remotes_empty_when_none_tracked() {
-        let remotes = vec![remote("origin", false), remote("upstream", false)];
-        let b = Bookmark::with_remotes("feat".into(), remotes);
+        let origin_ref = make_remote_ref(false);
+        let upstream_ref = make_remote_ref(false);
+        let target = LocalRemoteRefTarget {
+            local_target: RefTarget::absent_ref(),
+            remote_refs: vec![
+                (RemoteName::new("origin"), &origin_ref),
+                (RemoteName::new("upstream"), &upstream_ref),
+            ],
+        };
+        let b = Bookmark::new("feat".into(), target);
         assert_eq!(b.tracked_remotes().count(), 0);
     }
 
     #[test]
     fn tracked_remotes_empty_when_no_remotes() {
-        let b = Bookmark::new("feat".into());
+        let b = Bookmark::new("feat".into(), absent_target());
         assert_eq!(b.tracked_remotes().count(), 0);
     }
 
     #[test]
     fn equality_is_name_only() {
-        let a = Bookmark::with_remotes("feat".into(), vec![remote("origin", true)]);
-        let b = Bookmark::with_remotes("feat".into(), vec![remote("upstream", false)]);
+        let origin_ref = make_remote_ref(true);
+        let upstream_ref = make_remote_ref(false);
+        let a = Bookmark::new(
+            "feat".into(),
+            LocalRemoteRefTarget {
+                local_target: RefTarget::absent_ref(),
+                remote_refs: vec![(RemoteName::new("origin"), &origin_ref)],
+            },
+        );
+        let b = Bookmark::new(
+            "feat".into(),
+            LocalRemoteRefTarget {
+                local_target: RefTarget::absent_ref(),
+                remote_refs: vec![(RemoteName::new("upstream"), &upstream_ref)],
+            },
+        );
         assert_eq!(a, b);
     }
 
     #[test]
     fn inequality_when_names_differ() {
-        let a = Bookmark::new("feat-a".into());
-        let b = Bookmark::new("feat-b".into());
+        let a = Bookmark::new("feat-a".into(), absent_target());
+        let b = Bookmark::new("feat-b".into(), absent_target());
         assert_ne!(a, b);
     }
 
     #[test]
     fn hash_is_name_only() {
-        let a = Bookmark::with_remotes("feat".into(), vec![remote("origin", true)]);
-        let b = Bookmark::with_remotes("feat".into(), vec![remote("upstream", false)]);
+        let origin_ref = make_remote_ref(true);
+        let upstream_ref = make_remote_ref(false);
+        let a = Bookmark::new(
+            "feat".into(),
+            LocalRemoteRefTarget {
+                local_target: RefTarget::absent_ref(),
+                remote_refs: vec![(RemoteName::new("origin"), &origin_ref)],
+            },
+        );
+        let b = Bookmark::new(
+            "feat".into(),
+            LocalRemoteRefTarget {
+                local_target: RefTarget::absent_ref(),
+                remote_refs: vec![(RemoteName::new("upstream"), &upstream_ref)],
+            },
+        );
         let mut set = HashSet::new();
         set.insert(a);
         set.insert(b);

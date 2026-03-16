@@ -1,42 +1,47 @@
-use std::collections::{HashMap, HashSet};
+use itertools::Itertools;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use jj_lib::{
     backend::CommitId,
     dag_walk::topo_order_forward,
-    git::REMOTE_NAME_FOR_LOCAL_GIT_REPO,
     graph::{GraphEdge, GraphNode, reverse_graph},
     repo::Repo,
     revset::{RevsetEvaluationError, RevsetExpression},
 };
 use thiserror::Error;
 
-use super::{Bookmark, RemoteTracking};
+use super::Bookmark;
 
 /// Nodes keyed by bookmark name and their outgoing edges, as built by
 /// [`BookmarkGraph::build_bookmark_graph`].
-type BookmarkGraphParts = (
-    HashMap<String, BookmarkNode>,
+type BookmarkGraphParts<'a> = (
+    HashMap<String, BookmarkNode<'a>>,
     HashMap<String, Vec<GraphEdge<String>>>,
 );
 
 /// A node in the bookmark DAG, wrapping a [`Bookmark`] with ancestry info.
 #[derive(Clone, Debug)]
-pub struct BookmarkNode {
-    bookmark: Bookmark,
+pub struct BookmarkNode<'a> {
+    bookmark: Bookmark<'a>,
     ascendants: Vec<String>,
+    commits: Vec<CommitId>,
 }
 
-impl BookmarkNode {
+impl<'a> BookmarkNode<'a> {
     /// Wrap a bookmark as a graph node with no ascendants.
-    pub fn new(bookmark: Bookmark) -> Self {
+    pub fn new(bookmark: Bookmark<'a>) -> Self {
         Self {
             bookmark,
             ascendants: Vec::new(),
+            commits: Vec::new(),
         }
     }
 
     /// The underlying bookmark.
-    pub fn bookmark(&self) -> &Bookmark {
+    pub fn bookmark(&self) -> &Bookmark<'_> {
         &self.bookmark
     }
 
@@ -49,8 +54,16 @@ impl BookmarkNode {
         &self.ascendants
     }
 
+    pub fn commits(&self) -> &[CommitId] {
+        &self.commits
+    }
+
     fn add_ascendant(&mut self, ascendant: String) {
         self.ascendants.push(ascendant);
+    }
+
+    fn add_commit(&mut self, commit: CommitId) {
+        self.commits.push(commit);
     }
 }
 
@@ -67,20 +80,20 @@ pub enum BookmarkGraphError {
 
 /// DAG of bookmarks between trunk and head, used for stack operations.
 #[derive(Debug)]
-pub struct BookmarkGraph {
-    nodes: HashMap<String, BookmarkNode>,
+pub struct BookmarkGraph<'a> {
+    nodes: HashMap<String, BookmarkNode<'a>>,
     edges: HashMap<String, Vec<GraphEdge<String>>>,
     head_bookmarks: HashSet<String>,
 }
 
-impl BookmarkGraph {
+impl<'a> BookmarkGraph<'a> {
     /// Build a bookmark graph from commits between `trunk` and `head`.
     ///
     /// Both should be pre-resolved commit IDs. Typically `trunk` comes from
     /// evaluating the `trunk()` revset alias, and `head` is the working-copy
     /// commit (`@`).
     pub fn new(
-        repo: &dyn Repo,
+        repo: &'a (dyn Repo + 'a),
         trunk: &CommitId,
         head: &CommitId,
     ) -> Result<Self, BookmarkGraphError> {
@@ -102,7 +115,7 @@ impl BookmarkGraph {
     }
 
     /// Iterate bookmarks in topological order (roots first).
-    pub fn iter_graph(&self) -> Result<impl Iterator<Item = &BookmarkNode>, BookmarkGraphError> {
+    pub fn iter_graph(&self) -> Result<impl Iterator<Item = &BookmarkNode<'a>>, BookmarkGraphError> {
         let result = topo_order_forward(
             self.head_bookmarks.iter().map(|name| &self.nodes[name]),
             |node| node.name(),
@@ -143,26 +156,21 @@ impl BookmarkGraph {
         Ok(reverse_graph(revset.iter_graph(), |id| id).expect("commit graph should be acyclic"))
     }
 
-    fn build_bookmark_commit_map(repo: &dyn Repo) -> HashMap<CommitId, Bookmark> {
-        let mut map = HashMap::new();
-        repo.view().bookmarks().for_each(|(ref_name, ref_target)| {
-            if let Some(commit_id) = ref_target.local_target.as_normal() {
-                let remotes: Vec<RemoteTracking> = ref_target
-                    .remote_refs
-                    .iter()
-                    .filter(|(remote_name, _)| *remote_name != REMOTE_NAME_FOR_LOCAL_GIT_REPO)
-                    .map(|(remote_name, remote_ref)| RemoteTracking {
-                        remote_name: remote_name.as_str().to_string(),
-                        is_tracked: remote_ref.is_tracked(),
-                    })
-                    .collect();
-
-                map.entry(commit_id.clone()).or_insert_with(|| {
-                    Bookmark::with_remotes(ref_name.as_str().to_string(), remotes)
-                });
-            }
-        });
-        map
+    fn build_bookmark_commit_map(repo: &'a (dyn Repo + 'a)) -> HashMap<CommitId, Vec<Arc<Bookmark<'a>>>> {
+        repo.view()
+            .bookmarks()
+            .filter_map(|(ref_name, ref_target)| {
+                // Ignore unresolved/conflicted commits
+                // TODO: Improve this behavior
+                if let Some(commit_id) = ref_target.local_target.as_normal() {
+                    return Some((
+                        commit_id.to_owned(),
+                        Arc::new(Bookmark::new(ref_name.as_str().to_string(), ref_target)),
+                    ));
+                }
+                None
+            })
+            .into_group_map()
     }
 
     fn find_head_commits(reversed: &[GraphNode<CommitId>]) -> Vec<&CommitId> {
@@ -180,8 +188,8 @@ impl BookmarkGraph {
 
     fn build_bookmark_graph(
         reversed: &[GraphNode<CommitId>],
-        bookmarks_per_commit: &HashMap<CommitId, Bookmark>,
-    ) -> BookmarkGraphParts {
+        bookmarks_per_commit: &HashMap<CommitId, Vec<Arc<Bookmark<'a>>>>,
+    ) -> BookmarkGraphParts<'a> {
         let commit_index: HashMap<&CommitId, &GraphNode<CommitId>> =
             reversed.iter().map(|node| (&node.0, node)).collect();
 
@@ -197,27 +205,35 @@ impl BookmarkGraph {
         while let Some((commit_id, parent_name)) = stack.pop() {
             let already_visited = !visited.insert(commit_id);
 
-            let maybe_bookmark = bookmarks_per_commit.get(commit_id);
+            let maybe_bookmarks = bookmarks_per_commit.get(commit_id);
 
-            if let Some(bookmark) = maybe_bookmark {
-                let name = bookmark.name().to_string();
+            if let Some(bookmarks) = maybe_bookmarks {
+                for bookmark in bookmarks {
+                    let name = bookmark.name().to_string();
 
-                let node = nodes
-                    .entry(name.clone())
-                    .or_insert_with(|| BookmarkNode::new(bookmark.clone()));
+                    let node = nodes
+                        .entry(name.clone())
+                        .or_insert_with(|| BookmarkNode::new(bookmark.as_ref().clone()));
 
-                if let Some(pn) = parent_name
-                    && !node.ascendants.contains(&pn.to_string())
-                {
-                    node.add_ascendant(pn.to_string());
-                }
+                    // Add commit to current node
+                    if !node.commits.contains(commit_id) {
+                        node.add_commit(commit_id.clone());
+                    }
 
-                let edge_list = edges.entry(name.clone()).or_default();
-                if let Some(pn) = parent_name
-                    && pn != name
-                    && !edge_list.iter().any(|e| e.target == pn)
-                {
-                    edge_list.push(GraphEdge::direct(pn.to_string()));
+                    // Add parent bookmark as ascendant of current node
+                    if let Some(pn) = parent_name
+                        && !node.ascendants.contains(&pn.to_string())
+                    {
+                        node.add_ascendant(pn.to_string());
+                    }
+
+                    let edge_list = edges.entry(name.clone()).or_default();
+                    if let Some(pn) = parent_name
+                        && pn != name
+                        && !edge_list.iter().any(|e| e.target == pn)
+                    {
+                        edge_list.push(GraphEdge::direct(pn.to_string()));
+                    }
                 }
             }
 
@@ -226,11 +242,20 @@ impl BookmarkGraph {
                 continue;
             }
 
-            let next_name = maybe_bookmark.map(|b| b.name()).or(parent_name);
-
-            if let Some(node) = commit_index.get(commit_id) {
-                for edge in &node.1 {
-                    stack.push((&edge.target, next_name));
+            if let Some(graph_node) = commit_index.get(commit_id) {
+                if let Some(bookmarks) = maybe_bookmarks {
+                    // Push children once per bookmark on this commit,
+                    // so each child discovers all parent bookmarks.
+                    for bookmark in bookmarks {
+                        for edge in &graph_node.1 {
+                            stack.push((&edge.target, Some(bookmark.name())));
+                        }
+                    }
+                } else {
+                    // No bookmarks on this commit — pass through the parent name.
+                    for edge in &graph_node.1 {
+                        stack.push((&edge.target, parent_name));
+                    }
                 }
             }
         }
@@ -256,31 +281,58 @@ impl BookmarkGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jj_lib::op_store::{LocalRemoteRefTarget, RefTarget};
 
     fn commit_id(byte: u8) -> CommitId {
         CommitId::new(vec![byte])
+    }
+
+    fn make_bookmark(name: &str) -> Bookmark<'static> {
+        Bookmark::new(
+            name.to_string(),
+            LocalRemoteRefTarget {
+                local_target: RefTarget::absent_ref(),
+                remote_refs: vec![],
+            },
+        )
+    }
+
+    fn bookmark_map(
+        entries: Vec<(CommitId, Vec<&str>)>,
+    ) -> HashMap<CommitId, Vec<Arc<Bookmark<'static>>>> {
+        entries
+            .into_iter()
+            .map(|(id, names)| {
+                (
+                    id,
+                    names
+                        .into_iter()
+                        .map(|n| Arc::new(make_bookmark(n)))
+                        .collect(),
+                )
+            })
+            .collect()
     }
 
     // -- BookmarkNode tests --
 
     #[test]
     fn bookmark_node_new_has_empty_ascendants() {
-        let node = BookmarkNode::new(Bookmark::new("feat".into()));
+        let node = BookmarkNode::new(make_bookmark("feat"));
         assert_eq!(node.name(), "feat");
         assert!(node.ascendants().is_empty());
     }
 
     #[test]
     fn bookmark_node_accessors() {
-        let bookmark = Bookmark::new("my-branch".into());
-        let node = BookmarkNode::new(bookmark.clone());
-        assert_eq!(node.bookmark(), &bookmark);
+        let node = BookmarkNode::new(make_bookmark("my-branch"));
+        assert_eq!(node.bookmark(), &make_bookmark("my-branch"));
         assert_eq!(node.name(), "my-branch");
     }
 
     #[test]
     fn bookmark_node_add_ascendant() {
-        let mut node = BookmarkNode::new(Bookmark::new("child".into()));
+        let mut node = BookmarkNode::new(make_bookmark("child"));
         node.add_ascendant("parent".into());
         node.add_ascendant("grandparent".into());
         assert_eq!(node.ascendants(), &["parent", "grandparent"]);
@@ -395,9 +447,10 @@ mod tests {
             (c.clone(), vec![]),
         ];
 
-        let mut bookmarks = HashMap::new();
-        bookmarks.insert(a.clone(), Bookmark::new("feat-a".into()));
-        bookmarks.insert(c.clone(), Bookmark::new("feat-c".into()));
+        let bookmarks = bookmark_map(vec![
+            (a.clone(), vec!["feat-a"]),
+            (c.clone(), vec!["feat-c"]),
+        ]);
 
         let (nodes, edges) = BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
 
@@ -427,10 +480,11 @@ mod tests {
             (c.clone(), vec![]),
         ];
 
-        let mut bookmarks = HashMap::new();
-        bookmarks.insert(a.clone(), Bookmark::new("top".into()));
-        bookmarks.insert(b.clone(), Bookmark::new("mid".into()));
-        bookmarks.insert(c.clone(), Bookmark::new("base".into()));
+        let bookmarks = bookmark_map(vec![
+            (a.clone(), vec!["top"]),
+            (b.clone(), vec!["mid"]),
+            (c.clone(), vec!["base"]),
+        ]);
 
         let (nodes, edges) = BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
 
@@ -468,11 +522,12 @@ mod tests {
             (d.clone(), vec![]),
         ];
 
-        let mut bookmarks = HashMap::new();
-        bookmarks.insert(a.clone(), Bookmark::new("top".into()));
-        bookmarks.insert(b.clone(), Bookmark::new("left".into()));
-        bookmarks.insert(c.clone(), Bookmark::new("right".into()));
-        bookmarks.insert(d.clone(), Bookmark::new("base".into()));
+        let bookmarks = bookmark_map(vec![
+            (a.clone(), vec!["top"]),
+            (b.clone(), vec!["left"]),
+            (c.clone(), vec!["right"]),
+            (d.clone(), vec!["base"]),
+        ]);
 
         let (nodes, edges) = BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
 
@@ -501,8 +556,7 @@ mod tests {
         let a = commit_id(1);
         let reversed: Vec<GraphNode<CommitId>> = vec![(a.clone(), vec![])];
 
-        let mut bookmarks = HashMap::new();
-        bookmarks.insert(a.clone(), Bookmark::new("only".into()));
+        let bookmarks = bookmark_map(vec![(a.clone(), vec!["only"])]);
 
         let (nodes, edges) = BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
 
@@ -538,9 +592,10 @@ mod tests {
             (d.clone(), vec![]),
         ];
 
-        let mut bookmarks = HashMap::new();
-        bookmarks.insert(a.clone(), Bookmark::new("head".into()));
-        bookmarks.insert(d.clone(), Bookmark::new("base".into()));
+        let bookmarks = bookmark_map(vec![
+            (a.clone(), vec!["head"]),
+            (d.clone(), vec!["base"]),
+        ]);
 
         let (nodes, edges) = BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
 
@@ -571,10 +626,11 @@ mod tests {
             (c.clone(), vec![]),
         ];
 
-        let mut bookmarks = HashMap::new();
-        bookmarks.insert(a.clone(), Bookmark::new("root".into()));
-        bookmarks.insert(b.clone(), Bookmark::new("left".into()));
-        bookmarks.insert(c.clone(), Bookmark::new("right".into()));
+        let bookmarks = bookmark_map(vec![
+            (a.clone(), vec!["root"]),
+            (b.clone(), vec!["left"]),
+            (c.clone(), vec!["right"]),
+        ]);
 
         let (nodes, edges) = BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
 
@@ -609,10 +665,11 @@ mod tests {
             (c.clone(), vec![]),
         ];
 
-        let mut bookmarks = HashMap::new();
-        bookmarks.insert(a.clone(), Bookmark::new("top".into()));
-        bookmarks.insert(b.clone(), Bookmark::new("mid".into()));
-        bookmarks.insert(c.clone(), Bookmark::new("base".into()));
+        let bookmarks = bookmark_map(vec![
+            (a.clone(), vec!["top"]),
+            (b.clone(), vec!["mid"]),
+            (c.clone(), vec!["base"]),
+        ]);
 
         let (nodes, edges) = BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
 
@@ -629,5 +686,50 @@ mod tests {
         assert_eq!(base_edge_targets.len(), 2);
         assert!(base_edge_targets.contains("top"));
         assert!(base_edge_targets.contains("mid"));
+    }
+
+    #[test]
+    fn build_bookmark_graph_multiple_bookmarks_on_same_commit() {
+        // A -> B, commit A has two bookmarks "feat-1" and "feat-2", B has "base"
+        // Both feat-1 and feat-2 should be head nodes, base should have both as ascendants.
+        let a = commit_id(1);
+        let b = commit_id(2);
+
+        let reversed: Vec<GraphNode<CommitId>> = vec![
+            (a.clone(), vec![GraphEdge::direct(b.clone())]),
+            (b.clone(), vec![]),
+        ];
+
+        let bookmarks = bookmark_map(vec![
+            (a.clone(), vec!["feat-1", "feat-2"]),
+            (b.clone(), vec!["base"]),
+        ]);
+
+        let (nodes, edges) = BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
+
+        assert_eq!(nodes.len(), 3);
+        assert!(nodes.contains_key("feat-1"));
+        assert!(nodes.contains_key("feat-2"));
+        assert!(nodes.contains_key("base"));
+
+        // base should have both feat-1 and feat-2 as ascendants
+        let base_ascendants = nodes["base"].ascendants();
+        assert_eq!(
+            base_ascendants.len(),
+            2,
+            "base should have 2 ascendants, got: {base_ascendants:?}"
+        );
+        assert!(base_ascendants.contains(&"feat-1".to_string()));
+        assert!(base_ascendants.contains(&"feat-2".to_string()));
+
+        // base edges should point to both
+        let base_edge_targets: HashSet<&str> =
+            edges["base"].iter().map(|e| e.target.as_str()).collect();
+        assert!(base_edge_targets.contains("feat-1"));
+        assert!(base_edge_targets.contains("feat-2"));
+
+        // feat-1 and feat-2 should have no ascendants (they are heads)
+        assert!(nodes["feat-1"].ascendants().is_empty());
+        assert!(nodes["feat-2"].ascendants().is_empty());
     }
 }

@@ -208,7 +208,7 @@ fn persist_forge_config(
 /// exists on any forge.
 async fn sync_bookmark(
     ui: &Ui,
-    bookmark: &Bookmark,
+    bookmark: &Bookmark<'_>,
     forge_map: &HashMap<String, Box<dyn Forge>>,
 ) -> Result<Option<ForgeMeta>, BookmarkSyncError> {
     let tracked_remotes: Vec<&str> = bookmark.tracked_remotes().collect();

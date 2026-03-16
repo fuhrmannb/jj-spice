@@ -125,7 +125,7 @@ fn detect_forge_map(env: &SpiceEnv) -> HashMap<String, Box<dyn Forge>> {
 /// Returns a map from bookmark name to the live CR result. Forge API errors
 /// are captured per-bookmark rather than failing the entire command.
 async fn fetch_live_crs(
-    nodes: &[&BookmarkNode],
+    nodes: &[&BookmarkNode<'_>],
     cr_state: &crate::protos::change_request::ChangeRequests,
     forge_map: &HashMap<String, Box<dyn Forge>>,
 ) -> HashMap<String, Result<Box<dyn ChangeRequest>, String>> {
@@ -183,7 +183,7 @@ fn find_forge_for_bookmark<'a>(
 /// **later** (below) in the output.
 fn render_graph(
     env: &SpiceEnv,
-    nodes: &[&BookmarkNode],
+    nodes: &[&BookmarkNode<'_>],
     graph: &BookmarkGraph,
     trunk_name: Option<&str>,
     cr_state: &crate::protos::change_request::ChangeRequests,
@@ -432,6 +432,17 @@ mod tests {
     use super::*;
     use crate::forge::github::GitHubChangeRequest;
     use crate::protos::change_request::{ChangeRequests, GitHubMeta};
+    use jj_lib::op_store::{LocalRemoteRefTarget, RefTarget};
+
+    fn make_node(name: &str) -> BookmarkNode<'static> {
+        BookmarkNode::new(crate::bookmark::Bookmark::new(
+            name.into(),
+            LocalRemoteRefTarget {
+                local_target: RefTarget::absent_ref(),
+                remote_refs: vec![],
+            },
+        ))
+    }
 
     // -- format_meta_id tests --
 
@@ -516,7 +527,7 @@ mod tests {
 
     #[test]
     fn node_text_no_cr() {
-        let node = BookmarkNode::new(crate::bookmark::Bookmark::new("feature-a".into()));
+        let node = make_node("feature-a");
         let cr_state = ChangeRequests::default();
         let live_crs = HashMap::new();
 
@@ -527,7 +538,7 @@ mod tests {
 
     #[test]
     fn node_text_with_live_cr_layout() {
-        let node = BookmarkNode::new(crate::bookmark::Bookmark::new("feature-a".into()));
+        let node = make_node("feature-a");
         let mut cr_state = ChangeRequests::default();
         cr_state.set(
             "feature-a".into(),
@@ -578,7 +589,7 @@ mod tests {
 
     #[test]
     fn node_text_with_live_draft_cr() {
-        let node = BookmarkNode::new(crate::bookmark::Bookmark::new("feat".into()));
+        let node = make_node("feat");
         let mut cr_state = ChangeRequests::default();
         cr_state.set(
             "feat".into(),
@@ -623,7 +634,7 @@ mod tests {
 
     #[test]
     fn node_text_with_stored_meta_but_no_forge() {
-        let node = BookmarkNode::new(crate::bookmark::Bookmark::new("feature-b".into()));
+        let node = make_node("feature-b");
         let mut cr_state = ChangeRequests::default();
         cr_state.set(
             "feature-b".into(),

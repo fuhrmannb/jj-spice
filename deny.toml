@@ -23,6 +23,7 @@ allow = [
     "OpenSSL",
     "CC0-1.0",
     "BSL-1.0",
+    "WTFPL",
 ]
 
 [bans]

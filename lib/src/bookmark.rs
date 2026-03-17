@@ -1,4 +1,6 @@
 use jj_lib::op_store::LocalRemoteRefTarget;
+use jj_lib::ref_name::RemoteNameBuf;
+use jj_lib::refs::LocalAndRemoteRef;
 
 /// DAG of bookmarks between trunk and head for stack operations.
 pub mod graph;
@@ -79,14 +81,29 @@ impl<'a> Bookmark<'a> {
             .filter(|r| r.is_tracked)
             .map(|r| r.remote_name.as_str())
     }
+
+    /// Ref target for a given remote.
+    pub fn remote_ref(&self, remote_name: &RemoteNameBuf) -> Option<LocalAndRemoteRef<'a>> {
+        self.ref_target
+            .remote_refs
+            .iter()
+            .find_map(|(r_name, r_ref)| {
+                (r_name == remote_name).then_some(LocalAndRemoteRef {
+                    local_target: self.ref_target.local_target,
+                    remote_ref: r_ref,
+                })
+            })
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::collections::HashSet;
+
     use jj_lib::op_store::{LocalRemoteRefTarget, RefTarget, RemoteRef, RemoteRefState};
     use jj_lib::ref_name::RemoteName;
-    use std::collections::HashSet;
+
+    use super::*;
 
     fn absent_target() -> LocalRemoteRefTarget<'static> {
         LocalRemoteRefTarget {

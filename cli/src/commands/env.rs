@@ -9,8 +9,10 @@ use jj_cli::revset_util::{RevsetExpressionEvaluator, load_revset_aliases};
 use jj_cli::ui::Ui;
 use jj_lib::backend::CommitId;
 use jj_lib::config::{ConfigLayer, ConfigSource};
+use jj_lib::git::GitSettings;
 use jj_lib::id_prefix::IdPrefixContext;
 use jj_lib::op_walk;
+use jj_lib::ref_name::RemoteNameBuf;
 use jj_lib::repo::{ReadonlyRepo, StoreFactories};
 use jj_lib::repo_path::RepoPathUiConverter;
 use jj_lib::revset::{
@@ -30,6 +32,8 @@ pub(crate) struct SpiceEnv {
     pub(crate) repo: Arc<ReadonlyRepo>,
     /// Resolved user settings from the full jj config stack.
     pub(crate) settings: UserSettings,
+    /// Resolved Git settings from the full jj config stack.
+    pub(crate) git_settings: GitSettings,
     /// Open workspace (working copy + repo loader).
     pub(crate) workspace: Workspace,
     /// Configuration environment for locating config files (e.g. repo config).
@@ -61,6 +65,7 @@ impl SpiceEnv {
             &StoreFactories::default(),
             &default_working_copy_factories(),
         )?;
+        let git_settings = GitSettings::from_settings(&settings)?;
 
         // 3. Load the repo, optionally at a specific operation (--at-operation).
         let repo = if let Some(op_str) = &global_args.at_operation {
@@ -89,6 +94,7 @@ impl SpiceEnv {
             ui,
             repo,
             settings,
+            git_settings,
             workspace,
             config_env,
             path_converter,
@@ -120,6 +126,16 @@ impl SpiceEnv {
     /// Access the resolved configuration.
     pub(crate) fn config(&self) -> &jj_lib::config::StackedConfig {
         self.settings.config()
+    }
+
+    /// Resolve the default push remote from config (`git.push`),
+    /// falling back to `"origin"`.
+    pub(crate) fn get_default_remote(&self) -> RemoteNameBuf {
+        let name = self
+            .config()
+            .get::<String>(["git", "push"])
+            .unwrap_or_else(|_| "origin".to_string());
+        RemoteNameBuf::from(name)
     }
 
     /// Resolve a revset expression to exactly one commit ID.

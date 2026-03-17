@@ -1,7 +1,12 @@
 use std::io::Write as _;
 
 use jj_cli::description_util::TextEditor;
+use jj_cli::git_util::{GitSubprocessUi, print_push_stats};
 use jj_lib::backend::CommitId;
+use jj_lib::git::{self, GitBranchPushTargets};
+use jj_lib::ref_name::{RefNameBuf, RemoteNameBuf};
+use jj_lib::refs::{BookmarkPushAction, BookmarkPushUpdate, classify_bookmark_push_action};
+use jj_spice_lib::bookmark::Bookmark;
 
 use crate::commands::env::SpiceEnv;
 use jj_spice_lib::bookmark::graph::BookmarkGraph;
@@ -28,6 +33,9 @@ pub async fn run(
     for bookmark_node in iter_graph {
         let bookmark = bookmark_node.bookmark();
         let ascendants = bookmark_node.ascendants();
+
+        // Check for untracked changes in the bookmark and push them if the user agrees.
+        check_untracked_changes(&env.ui, env, bookmark)?;
 
         // If the change request already exists, retarget if needed.
         let existing = get_existing_change_request(&env.ui, &state, forge, bookmark.name()).await?;
@@ -113,6 +121,45 @@ pub async fn run(
     Ok(())
 }
 
+/// Check for untracked changes in the bookmark and push them if the user agrees.
+fn check_untracked_changes(
+    ui: &jj_cli::ui::Ui,
+    env: &SpiceEnv,
+    bookmark: &Bookmark,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let remote = env.get_default_remote();
+    let local_remote_target = bookmark
+        .remote_ref(&remote)
+        .ok_or_else(|| format!("No remote ref found for bookmark {}", bookmark.name()))?;
+    match classify_bookmark_push_action(local_remote_target) {
+        BookmarkPushAction::AlreadyMatches => {}
+        BookmarkPushAction::Update(push_update) => {
+            writeln!(
+                ui.warning_default(),
+                "Untracked changes have been detected. Do you want to push them?",
+            )?;
+            if ui.prompt_yes_no("Push changes?", Some(true))? {
+                push_bookmarks(env, &remote, bookmark, push_update)?;
+                writeln!(
+                    ui.stdout_formatter(),
+                    "Pushed {} to {}",
+                    bookmark.name(),
+                    remote.as_str(),
+                )?;
+            }
+        }
+        action => {
+            writeln!(
+                ui.warning_default(),
+                "Bookmark {} has unexpected state: {:?}",
+                bookmark.name(),
+                action,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// Look up an existing change request for a bookmark.
 ///
 /// 1. Check local state first — if already tracked, return it.
@@ -161,5 +208,32 @@ async fn get_existing_change_request(
 
             Ok(Some(metas.into_iter().nth(index).unwrap()))
         }
+    }
+}
+
+fn push_bookmarks(
+    env: &SpiceEnv,
+    remote_name: &RemoteNameBuf,
+    bookmark: &Bookmark,
+    push_update: BookmarkPushUpdate,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let targets = GitBranchPushTargets {
+        branch_updates: vec![(RefNameBuf::from(bookmark.name()), push_update)],
+    };
+
+    let mut tx = env.repo.start_transaction();
+    let push_stats = git::push_branches(
+        tx.repo_mut(),
+        env.git_settings.to_subprocess_options(),
+        remote_name.as_ref(),
+        &targets,
+        &mut GitSubprocessUi::new(&env.ui),
+    )?;
+
+    print_push_stats(&env.ui, &push_stats)?;
+    if push_stats.all_ok() {
+        Ok(())
+    } else {
+        Err("Failed to push some bookmarks".into())
     }
 }

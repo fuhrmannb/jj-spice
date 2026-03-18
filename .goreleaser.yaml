@@ -108,11 +108,3 @@ winget:
           owner: microsoft
           name: winget-pkgs
           branch: master
-
-# Publish to crates.io after all artifacts are built.
-# Dry-run for snapshots, real publish for tags.
-# Publish lib first (cli depends on it).
-after:
-  hooks:
-    - cmd: cargo publish -p jj-spice-lib {{ if .IsSnapshot }}--dry-run{{ end }} --quiet --no-verify
-    - cmd: cargo publish -p jj-spice-cli {{ if .IsSnapshot }}--dry-run{{ end }} --quiet --no-verify

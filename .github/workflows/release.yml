@@ -39,3 +39,14 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
           GH_PAT: ${{ secrets.GH_PAT }}
+          CHOCOLATEY_API_KEY: ${{ secrets.CHOCOLATEY_API_KEY }}
+
+      - name: Publish jj-spice-lib to crates.io
+        run: cargo publish -p jj-spice-lib --quiet --no-verify
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Publish jj-spice-cli to crates.io
+        run: cargo publish -p jj-spice-cli --quiet --no-verify
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

@@ -7,7 +7,6 @@ before:
 
 builds:
   - builder: rust
-    dir: cli
     binary: jj-spice
     targets:
       - x86_64-unknown-linux-gnu
@@ -17,6 +16,8 @@ builds:
       - x86_64-pc-windows-gnu
     flags:
       - --release
+      - -p
+      - jj-spice-cli
 
 archives:
   - format_overrides:

@@ -1,6 +1,7 @@
 use std::fmt;
 use std::process::Command;
 
+use http_body_util::BodyExt;
 use octocrab::Octocrab;
 use octocrab::models::IssueState;
 use octocrab::models::pulls::PullRequest;
@@ -119,6 +120,108 @@ impl ChangeRequest for GitHubChangeRequest {
     }
 }
 
+// ---------------------------------------------------------------------------
+// GraphQL response types for batch PR fetching
+// ---------------------------------------------------------------------------
+
+/// Top-level GraphQL response wrapper.
+#[derive(Debug, serde::Deserialize)]
+struct GraphQlResponse {
+    data: Option<serde_json::Value>,
+    errors: Option<Vec<GraphQlError>>,
+}
+
+/// A single error entry from a GraphQL response.
+#[derive(Debug, serde::Deserialize)]
+struct GraphQlError {
+    message: String,
+}
+
+/// A pull request node as returned by the GraphQL API.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphQlPullRequest {
+    number: u64,
+    title: String,
+    body: Option<String>,
+    /// One of `"OPEN"`, `"CLOSED"`, `"MERGED"`.
+    state: String,
+    is_draft: bool,
+    url: String,
+    head_ref_name: String,
+    base_ref_name: String,
+    head_repository: Option<GraphQlRepo>,
+    base_repository: Option<GraphQlRepo>,
+}
+
+/// Repository identity inside a GraphQL pull request node.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GraphQlRepo {
+    name_with_owner: String,
+}
+
+/// Convert a GraphQL pull request to a [`GitHubChangeRequest`].
+fn graphql_pr_to_cr(pr: &GraphQlPullRequest, host: &str) -> GitHubChangeRequest {
+    let status = match (pr.state.as_str(), pr.is_draft) {
+        ("MERGED", _) => ChangeStatus::Merged,
+        ("CLOSED", _) => ChangeStatus::Closed,
+        ("OPEN", true) => ChangeStatus::Draft,
+        _ => ChangeStatus::Open,
+    };
+
+    let meta = GitHubMeta {
+        number: pr.number,
+        source_branch: pr.head_ref_name.clone(),
+        target_branch: pr.base_ref_name.clone(),
+        source_repo: pr
+            .head_repository
+            .as_ref()
+            .map(|r| r.name_with_owner.clone())
+            .unwrap_or_default(),
+        target_repo: pr
+            .base_repository
+            .as_ref()
+            .map(|r| r.name_with_owner.clone())
+            .unwrap_or_default(),
+        graphql_id: String::new(),
+    };
+
+    GitHubChangeRequest {
+        meta,
+        host: host.to_string(),
+        title: pr.title.clone(),
+        body: pr.body.clone(),
+        status,
+        url: pr.url.clone(),
+    }
+}
+
+/// Build a GraphQL query that fetches multiple PRs in a single request.
+///
+/// Each PR is aliased as `pr0`, `pr1`, ... so the response can be
+/// indexed by position.
+fn build_graphql_batch_query(owner: &str, repo: &str, numbers: &[u64]) -> serde_json::Value {
+    const FIELDS: &str = "\
+        number title body state isDraft url \
+        headRefName baseRefName \
+        headRepository { nameWithOwner } \
+        baseRepository { nameWithOwner }";
+
+    let aliases: Vec<String> = numbers
+        .iter()
+        .enumerate()
+        .map(|(i, n)| format!("pr{i}: pullRequest(number: {n}) {{ {FIELDS} }}"))
+        .collect();
+
+    let query = format!(
+        "query {{ repository(owner: \"{owner}\", name: \"{repo}\") {{ {} }} }}",
+        aliases.join(" ")
+    );
+
+    serde_json::json!({ "query": query })
+}
+
 /// GitHub / GitHub Enterprise forge backend backed by [`Octocrab`].
 pub struct GitHubForge {
     client: Octocrab,
@@ -126,6 +229,14 @@ pub struct GitHubForge {
     repo: String,
     /// Hostname used for display in link labels (e.g. `"github.com"`).
     host: String,
+    /// Full URL for the GraphQL endpoint.
+    ///
+    /// Stored at construction time because octocrab's `graphql()` method
+    /// resolves `/graphql` relative to `base_uri`, which produces the wrong
+    /// path for GitHub Enterprise (`/api/v3/graphql` instead of the correct
+    /// `/api/graphql`). We use `_post()` with this URL directly to bypass
+    /// that issue.
+    graphql_url: String,
 }
 
 /// Build an [`Octocrab`] client for GitHub using a resolved personal token.
@@ -148,18 +259,52 @@ impl GitHubForge {
     /// The caller is responsible for constructing the client with the desired
     /// authentication strategy (personal token, OAuth, GitHub App, etc.).
     /// Use [`build_octocrab_for_github`] for the common personal-token path.
+    ///
+    /// `graphql_url` is the full URL for the GraphQL endpoint:
+    /// - github.com: `"https://api.github.com/graphql"`
+    /// - GHE: `"https://{host}/api/graphql"`
     pub fn new(
         client: Octocrab,
         owner: impl Into<String>,
         repo: impl Into<String>,
         host: impl Into<String>,
+        graphql_url: impl Into<String>,
     ) -> Self {
         Self {
             client,
             owner: owner.into(),
             repo: repo.into(),
             host: host.into(),
+            graphql_url: graphql_url.into(),
         }
+    }
+
+    /// Execute a GraphQL request and return the raw response bytes.
+    ///
+    /// Separated into its own function so that the single `.await` in
+    /// `get_batch` only spans `Send`-safe types (no `Box<dyn ChangeRequest>`
+    /// held across the await boundary).
+    async fn execute_graphql(
+        client: &Octocrab,
+        uri: http::Uri,
+        payload: &serde_json::Value,
+    ) -> Result<Vec<u8>, String> {
+        let response = client
+            ._post(uri, Some(payload))
+            .await
+            .map_err(|e| format!("GraphQL request failed: {e}"))?;
+
+        if !response.status().is_success() {
+            return Err(format!("GraphQL HTTP error: {}", response.status()));
+        }
+
+        let collected = response
+            .into_body()
+            .collect()
+            .await
+            .map_err(|e| format!("failed to read GraphQL response: {e}"))?;
+
+        Ok(collected.to_bytes().to_vec())
     }
 
     /// Extract the [`GitHubMeta`] from a [`ForgeMeta`], returning an error if
@@ -331,6 +476,136 @@ impl Forge for GitHubForge {
             Ok(Box::new(github_cr_from_pr(&pr, &self.host)) as Box<dyn ChangeRequest>)
         })
     }
+
+    fn get_batch<'a>(&'a self, metas: Vec<&'a ForgeMeta>) -> BoxFuture<'a, Vec<ForgeResult>> {
+        Box::pin(async move {
+            if metas.is_empty() {
+                return Vec::new();
+            }
+
+            let len = metas.len();
+
+            // Extract PR numbers, tracking which input positions are valid.
+            // Use Send-safe types across await points.
+            let mut numbers = Vec::with_capacity(len);
+            let mut index_map: Vec<Option<usize>> = Vec::with_capacity(len);
+            let mut early_errors: Vec<Option<String>> = vec![None; len];
+
+            for (i, meta) in metas.iter().enumerate() {
+                match Self::extract_meta(meta) {
+                    Ok(gh) => {
+                        index_map.push(Some(numbers.len()));
+                        numbers.push(gh.number);
+                    }
+                    Err(e) => {
+                        index_map.push(None);
+                        early_errors[i] = Some(e.to_string());
+                    }
+                }
+            }
+
+            if numbers.is_empty() {
+                return early_errors
+                    .into_iter()
+                    .map(|e| Err(e.unwrap_or_else(|| "not fetched".to_string()).into()))
+                    .collect();
+            }
+
+            let payload = build_graphql_batch_query(&self.owner, &self.repo, &numbers);
+
+            // POST directly to the stored GraphQL URL, bypassing octocrab's
+            // BaseUri middleware which produces wrong paths for GHE.
+            let uri: http::Uri = match self.graphql_url.parse() {
+                Ok(u) => u,
+                Err(e) => {
+                    let err_msg = format!("invalid GraphQL URL: {e}");
+                    return (0..len)
+                        .map(|i| {
+                            Err(early_errors[i]
+                                .clone()
+                                .unwrap_or_else(|| err_msg.clone())
+                                .into())
+                        })
+                        .collect();
+                }
+            };
+
+            // Single HTTP request — the only await in this function.
+            let gql_body = match Self::execute_graphql(&self.client, uri, &payload).await {
+                Ok(body) => body,
+                Err(err_msg) => {
+                    return (0..len)
+                        .map(|i| {
+                            Err(early_errors[i]
+                                .clone()
+                                .unwrap_or_else(|| err_msg.clone())
+                                .into())
+                        })
+                        .collect();
+                }
+            };
+
+            // Everything below is synchronous — safe to build ForgeResult values.
+            let gql_response: GraphQlResponse = match serde_json::from_slice(&gql_body) {
+                Ok(r) => r,
+                Err(e) => {
+                    let err_msg = format!("failed to parse GraphQL response: {e}");
+                    return (0..len)
+                        .map(|i| {
+                            Err(early_errors[i]
+                                .clone()
+                                .unwrap_or_else(|| err_msg.clone())
+                                .into())
+                        })
+                        .collect();
+                }
+            };
+
+            let repo_data = gql_response.data.as_ref().and_then(|d| d.get("repository"));
+
+            // Build final results — no await points after this.
+            (0..len)
+                .map(|i| {
+                    if let Some(err) = &early_errors[i] {
+                        return Err(err.clone().into());
+                    }
+
+                    let num_idx = index_map[i].unwrap();
+                    let alias = format!("pr{num_idx}");
+                    let pr_value = repo_data.and_then(|r| r.get(&alias));
+
+                    match pr_value {
+                        Some(serde_json::Value::Null) | None => {
+                            let err_msg = gql_response
+                                .errors
+                                .as_ref()
+                                .and_then(|errs| {
+                                    errs.iter().find_map(|e| {
+                                        if e.message.contains(&numbers[num_idx].to_string()) {
+                                            Some(e.message.clone())
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                })
+                                .unwrap_or_else(|| format!("PR #{} not found", numbers[num_idx]));
+                            Err(err_msg.into())
+                        }
+                        Some(value) => {
+                            match serde_json::from_value::<GraphQlPullRequest>(value.clone()) {
+                                Ok(pr) => Ok(Box::new(graphql_pr_to_cr(&pr, &self.host))
+                                    as Box<dyn ChangeRequest>),
+                                Err(e) => {
+                                    Err(format!("failed to parse PR #{}: {e}", numbers[num_idx])
+                                        .into())
+                                }
+                            }
+                        }
+                    }
+                })
+                .collect()
+        })
+    }
 }
 
 #[cfg(test)]
@@ -456,7 +731,8 @@ mod tests {
 
     /// Build a [`GitHubForge`] backed by the mock server.
     fn mock_forge(uri: &str) -> GitHubForge {
-        GitHubForge::new(mock_octocrab(uri), OWNER, REPO, "github.com")
+        let graphql_url = format!("{uri}/graphql");
+        GitHubForge::new(mock_octocrab(uri), OWNER, REPO, "github.com", graphql_url)
     }
 
     /// Minimal GitHub PR JSON response with the fields our code reads.
@@ -764,5 +1040,163 @@ mod tests {
         let mut cr = sample_cr();
         cr.meta.target_repo = String::new();
         assert_eq!(cr.link_label(), "github.com:42?");
+    }
+
+    // -- GraphQL batch tests --
+
+    /// Build a GraphQL PR response node matching the fields in our query.
+    fn graphql_pr_node(number: u64, state: &str, is_draft: bool) -> serde_json::Value {
+        json!({
+            "number": number,
+            "title": format!("PR #{number}"),
+            "body": "A test pull request",
+            "state": state,
+            "isDraft": is_draft,
+            "url": format!("https://github.com/{OWNER}/{REPO}/pull/{number}"),
+            "headRefName": "feature-branch",
+            "baseRefName": "main",
+            "headRepository": { "nameWithOwner": format!("{OWNER}/{REPO}") },
+            "baseRepository": { "nameWithOwner": format!("{OWNER}/{REPO}") },
+        })
+    }
+
+    #[tokio::test]
+    async fn get_batch_returns_multiple_prs() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "repository": {
+                        "pr0": graphql_pr_node(42, "OPEN", false),
+                        "pr1": graphql_pr_node(43, "MERGED", false),
+                        "pr2": graphql_pr_node(44, "OPEN", true),
+                    }
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let forge = mock_forge(&mock_server.uri());
+        let m1 = github_meta(42);
+        let m2 = github_meta(43);
+        let m3 = github_meta(44);
+        let results = forge.get_batch(vec![&m1, &m2, &m3]).await;
+
+        assert_eq!(results.len(), 3);
+        let cr0 = results[0].as_ref().ok().unwrap();
+        assert_eq!(cr0.id(), "42");
+        assert_eq!(cr0.status(), ChangeStatus::Open);
+
+        let cr1 = results[1].as_ref().ok().unwrap();
+        assert_eq!(cr1.id(), "43");
+        assert_eq!(cr1.status(), ChangeStatus::Merged);
+
+        let cr2 = results[2].as_ref().ok().unwrap();
+        assert_eq!(cr2.id(), "44");
+        assert_eq!(cr2.status(), ChangeStatus::Draft);
+    }
+
+    #[tokio::test]
+    async fn get_batch_handles_single_pr() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "repository": {
+                        "pr0": graphql_pr_node(42, "OPEN", false),
+                    }
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let forge = mock_forge(&mock_server.uri());
+        let m1 = github_meta(42);
+        let results = forge.get_batch(vec![&m1]).await;
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].as_ref().ok().unwrap().id(), "42");
+    }
+
+    #[tokio::test]
+    async fn get_batch_empty_input() {
+        let mock_server = MockServer::start().await;
+        // No mocks mounted — should not make any HTTP calls.
+        let forge = mock_forge(&mock_server.uri());
+        let results = forge.get_batch(vec![]).await;
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_batch_partial_failure_null_pr() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "repository": {
+                        "pr0": graphql_pr_node(42, "OPEN", false),
+                        "pr1": null,
+                    }
+                },
+                "errors": [{
+                    "message": "Could not resolve to a PullRequest with the number of 999."
+                }]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let forge = mock_forge(&mock_server.uri());
+        let m1 = github_meta(42);
+        let m2 = github_meta(999);
+        let results = forge.get_batch(vec![&m1, &m2]).await;
+
+        assert_eq!(results.len(), 2);
+        assert!(results[0].is_ok());
+        assert_eq!(results[0].as_ref().ok().unwrap().id(), "42");
+        assert!(results[1].is_err());
+        let err_msg = match &results[1] {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected error"),
+        };
+        assert!(
+            err_msg.contains("999"),
+            "error should mention PR number: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_batch_graphql_http_error() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&mock_server)
+            .await;
+
+        let forge = mock_forge(&mock_server.uri());
+        let m1 = github_meta(42);
+        let results = forge.get_batch(vec![&m1]).await;
+
+        assert_eq!(results.len(), 1);
+        let err_msg = match &results[0] {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected error"),
+        };
+        assert!(
+            err_msg.contains("500"),
+            "error should mention 500: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn build_graphql_batch_query_structure() {
+        let query = build_graphql_batch_query("owner", "repo", &[42, 43]);
+        let query_str = query["query"].as_str().unwrap();
+        assert!(query_str.contains("repository(owner: \"owner\", name: \"repo\")"));
+        assert!(query_str.contains("pr0: pullRequest(number: 42)"));
+        assert!(query_str.contains("pr1: pullRequest(number: 43)"));
     }
 }

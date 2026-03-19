@@ -137,6 +137,13 @@ async fn fetch_live_crs(
 ) -> HashMap<String, Result<Box<dyn ChangeRequest>, String>> {
     let mut results = HashMap::new();
 
+    // Group bookmarks by forge identity so we can batch per forge.
+    type ForgeGroup<'a> = (
+        &'a dyn Forge,
+        Vec<(&'a str, &'a jj_spice_lib::protos::change_request::ForgeMeta)>,
+    );
+    let mut forge_groups: HashMap<*const dyn Forge, ForgeGroup<'_>> = HashMap::new();
+
     for node in nodes {
         let name = node.name();
         let meta = match cr_state.get(name) {
@@ -144,7 +151,6 @@ async fn fetch_live_crs(
             None => continue,
         };
 
-        // Find a forge that can serve this CR.
         let forge = match find_forge_for_bookmark(node, forge_map) {
             Some(f) => f,
             None => {
@@ -153,12 +159,28 @@ async fn fetch_live_crs(
             }
         };
 
-        match forge.get(meta).await {
-            Ok(cr) => {
-                results.insert(name.to_string(), Ok(cr));
-            }
-            Err(e) => {
-                results.insert(name.to_string(), Err(e.to_string()));
+        let key = forge as *const dyn Forge;
+        forge_groups
+            .entry(key)
+            .or_insert_with(|| (forge, Vec::new()))
+            .1
+            .push((name, meta));
+    }
+
+    // Batch-fetch per forge.
+    for (_, (forge, items)) in forge_groups {
+        let metas: Vec<&jj_spice_lib::protos::change_request::ForgeMeta> =
+            items.iter().map(|(_, m)| *m).collect();
+        let batch_results = forge.get_batch(metas).await;
+
+        for ((name, _), result) in items.into_iter().zip(batch_results) {
+            match result {
+                Ok(cr) => {
+                    results.insert(name.to_string(), Ok(cr));
+                }
+                Err(e) => {
+                    results.insert(name.to_string(), Err(e.to_string()));
+                }
             }
         }
     }

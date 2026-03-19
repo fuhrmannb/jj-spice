@@ -7,15 +7,18 @@ license.workspace = true
 
 [dependencies]
 gix = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
 itertools = { workspace = true }
 jj-lib = { workspace = true }
 octocrab = { workspace = true }
 prost = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
-serde_json = { workspace = true }
 tokio = { workspace = true }
 wiremock = { workspace = true }

@@ -146,7 +146,14 @@ fn build_forge(
                 .as_ref()
                 .and_then(|u| u.host_str().map(String::from))
                 .unwrap_or_else(|| "github.com".to_string());
-            Ok(Box::new(GitHubForge::new(client, owner, repo, host)))
+            let graphql_url = graphql_endpoint_url(&host);
+            Ok(Box::new(GitHubForge::new(
+                client,
+                owner,
+                repo,
+                host,
+                graphql_url,
+            )))
         }
     }
 }
@@ -177,7 +184,14 @@ pub fn build_forge_for_type(
                     source: Box::new(e),
                 }
             })?;
-            Ok(Box::new(GitHubForge::new(client, owner, repo, hostname)))
+            let graphql_url = graphql_endpoint_url(hostname);
+            Ok(Box::new(GitHubForge::new(
+                client,
+                owner,
+                repo,
+                hostname,
+                graphql_url,
+            )))
         }
         other => Err(ForgeDetectionError::ForgeCreation {
             remote: remote.to_string(),
@@ -222,6 +236,19 @@ fn detect_forge_from_host(
 /// Build the GitHub Enterprise API base URL for a given hostname.
 fn ghe_api_url(hostname: &str) -> Url {
     Url::parse(&format!("https://{hostname}/api/v3")).expect("hostname should form a valid URL")
+}
+
+/// Build the full GraphQL endpoint URL for a given hostname.
+///
+/// Follows the same convention as git-spice: the API base is
+/// `https://api.github.com` for github.com or `https://{host}/api` for GHE,
+/// and the GraphQL endpoint is `{api_base}/graphql`.
+pub(crate) fn graphql_endpoint_url(hostname: &str) -> String {
+    if hostname == "github.com" {
+        "https://api.github.com/graphql".to_string()
+    } else {
+        format!("https://{hostname}/api/graphql")
+    }
 }
 
 /// Extract `(owner, repo)` from a URL path component.
@@ -378,7 +405,8 @@ mod tests {
     #[tokio::test]
     async fn github_forge_new_for_github_dot_com() {
         let client = octocrab::Octocrab::builder().build().unwrap();
-        let _forge = GitHubForge::new(client, "acme", "widget", "github.com");
+        let graphql_url = graphql_endpoint_url("github.com");
+        let _forge = GitHubForge::new(client, "acme", "widget", "github.com", graphql_url);
     }
 
     #[tokio::test]
@@ -388,7 +416,30 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let _forge = GitHubForge::new(client, "acme", "widget", "git.corp.example.com");
+        let graphql_url = graphql_endpoint_url("git.corp.example.com");
+        let _forge = GitHubForge::new(
+            client,
+            "acme",
+            "widget",
+            "git.corp.example.com",
+            graphql_url,
+        );
+    }
+
+    #[test]
+    fn graphql_url_for_github_dot_com() {
+        assert_eq!(
+            graphql_endpoint_url("github.com"),
+            "https://api.github.com/graphql"
+        );
+    }
+
+    #[test]
+    fn graphql_url_for_github_enterprise() {
+        assert_eq!(
+            graphql_endpoint_url("git.corp.example.com"),
+            "https://git.corp.example.com/api/graphql"
+        );
     }
 
     // -- build_forge_for_type routing --

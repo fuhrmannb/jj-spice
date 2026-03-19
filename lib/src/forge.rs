@@ -92,6 +92,24 @@ pub trait Forge: Send + Sync {
     /// Fetch a change request by its stored metadata.
     fn get<'a>(&'a self, meta: &'a ForgeMeta) -> BoxFuture<'a, ForgeResult>;
 
+    /// Fetch multiple change requests in a single operation.
+    ///
+    /// Forges that support batching (e.g. GitHub via GraphQL) override this
+    /// for efficiency. The default calls [`Self::get`] sequentially.
+    ///
+    /// Results are returned in the same order as the input `metas`.
+    /// Fetch multiple change requests in a single operation.
+    ///
+    /// Forges that support batching (e.g. GitHub via GraphQL) override this
+    /// for efficiency. The default calls [`Self::get`] sequentially.
+    ///
+    /// Results are returned in the same order as the input `metas`.
+    fn get_batch<'a>(&'a self, metas: Vec<&'a ForgeMeta>) -> BoxFuture<'a, Vec<ForgeResult>> {
+        // Default: sequential fetches. Each result is produced and consumed
+        // one-at-a-time so no non-Send values are held across await points.
+        Box::pin(sequential_get_batch(self, metas))
+    }
+
     /// Find change requests by source and/or target branch.
     ///
     /// Useful for discovering existing CRs on the forge that are not yet
@@ -139,4 +157,42 @@ pub trait Forge: Send + Sync {
             Ok(crs.iter().map(|cr| cr.to_forge_meta()).collect())
         })
     }
+}
+
+/// Wrapper that makes a `ForgeResult` `Send` by asserting it is safe.
+///
+/// `Box<dyn ChangeRequest>` and `Box<dyn Error>` lack `Send`, but in practice
+/// every forge implementation returns types that _are_ `Send`. This wrapper
+/// exists solely to satisfy the `Send` bound on `BoxFuture` for the default
+/// sequential `get_batch` implementation where results are accumulated across
+/// `await` boundaries.
+///
+/// # Safety
+///
+/// Only use this with `ForgeResult` values produced by `Forge::get`, which
+/// in practice always return `Send`-safe concrete types.
+struct SendForgeResult(ForgeResult);
+
+// SAFETY: see struct documentation above.
+unsafe impl Send for SendForgeResult {}
+
+impl SendForgeResult {
+    fn into_inner(self) -> ForgeResult {
+        self.0
+    }
+}
+
+/// Default sequential implementation of [`Forge::get_batch`].
+async fn sequential_get_batch<'a, F: Forge + ?Sized>(
+    forge: &'a F,
+    metas: Vec<&'a ForgeMeta>,
+) -> Vec<ForgeResult> {
+    let mut results: Vec<SendForgeResult> = Vec::with_capacity(metas.len());
+    for meta in metas {
+        results.push(SendForgeResult(forge.get(meta).await));
+    }
+    results
+        .into_iter()
+        .map(SendForgeResult::into_inner)
+        .collect()
 }

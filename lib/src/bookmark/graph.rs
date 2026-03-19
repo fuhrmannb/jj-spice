@@ -1,6 +1,6 @@
 use itertools::Itertools;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
 };
 
@@ -17,9 +17,13 @@ use super::Bookmark;
 
 /// Nodes keyed by bookmark name and their outgoing edges, as built by
 /// [`BookmarkGraph::build_bookmark_graph`].
+///
+/// Uses [`BTreeMap`] to ensure deterministic iteration order (lexicographic
+/// by bookmark name), which is important for [`BookmarkGraph::find_head_bookmarks`]
+/// and for defense-in-depth against non-deterministic rendering.
 type BookmarkGraphParts<'a> = (
-    HashMap<String, BookmarkNode<'a>>,
-    HashMap<String, Vec<GraphEdge<String>>>,
+    BTreeMap<String, BookmarkNode<'a>>,
+    BTreeMap<String, Vec<GraphEdge<String>>>,
 );
 
 /// A node in the bookmark DAG, wrapping a [`Bookmark`] with ancestry info.
@@ -81,9 +85,14 @@ pub enum BookmarkGraphError {
 /// DAG of bookmarks between trunk and head, used for stack operations.
 #[derive(Debug)]
 pub struct BookmarkGraph<'a> {
-    nodes: HashMap<String, BookmarkNode<'a>>,
-    edges: HashMap<String, Vec<GraphEdge<String>>>,
-    head_bookmarks: HashSet<String>,
+    nodes: BTreeMap<String, BookmarkNode<'a>>,
+    edges: BTreeMap<String, Vec<GraphEdge<String>>>,
+    /// Head bookmarks sorted lexicographically for deterministic iteration.
+    ///
+    /// This ordering feeds into [`Self::iter_graph`] via `topo_order_forward`,
+    /// which uses a DFS with no tie-breaking. A stable starting order ensures
+    /// the graph layout is identical across runs.
+    head_bookmarks: Vec<String>,
 }
 
 impl<'a> BookmarkGraph<'a> {
@@ -118,9 +127,9 @@ impl<'a> BookmarkGraph<'a> {
         let commit_ids: Vec<CommitId> = bookmarks_per_commit.keys().cloned().collect();
         if commit_ids.is_empty() {
             return Ok(Self {
-                nodes: HashMap::new(),
-                edges: HashMap::new(),
-                head_bookmarks: HashSet::new(),
+                nodes: BTreeMap::new(),
+                edges: BTreeMap::new(),
+                head_bookmarks: Vec::new(),
             });
         }
         let heads_expr = RevsetExpression::commits(commit_ids);
@@ -248,8 +257,8 @@ impl<'a> BookmarkGraph<'a> {
 
         let head_commits = Self::find_head_commits(reversed);
 
-        let mut nodes: HashMap<String, BookmarkNode> = HashMap::new();
-        let mut edges: HashMap<String, Vec<GraphEdge<String>>> = HashMap::new();
+        let mut nodes: BTreeMap<String, BookmarkNode> = BTreeMap::new();
+        let mut edges: BTreeMap<String, Vec<GraphEdge<String>>> = BTreeMap::new();
         let mut visited: HashSet<&CommitId> = HashSet::new();
 
         let mut stack: Vec<(&CommitId, Option<&str>)> =
@@ -316,18 +325,24 @@ impl<'a> BookmarkGraph<'a> {
         (nodes, edges)
     }
 
-    fn find_head_bookmarks(edges: &HashMap<String, Vec<GraphEdge<String>>>) -> HashSet<String> {
+    /// Collect head bookmarks (those not targeted by any edge) into a sorted
+    /// [`Vec`] for deterministic iteration.
+    fn find_head_bookmarks(edges: &BTreeMap<String, Vec<GraphEdge<String>>>) -> Vec<String> {
         let all_edge_targets: HashSet<&str> = edges
             .values()
             .flatten()
             .map(|e| e.target.as_str())
             .collect();
 
-        edges
+        let mut heads: Vec<String> = edges
             .keys()
             .filter(|name| !all_edge_targets.contains(name.as_str()))
             .cloned()
-            .collect()
+            .collect();
+        // BTreeMap keys are already sorted, but sort explicitly for
+        // clarity and defense-in-depth.
+        heads.sort();
+        heads
     }
 }
 
@@ -436,7 +451,7 @@ mod tests {
     #[test]
     fn find_head_bookmarks_linear() {
         // "feat" -> "base", head is "feat"
-        let mut edges = HashMap::new();
+        let mut edges = BTreeMap::new();
         edges.insert(
             "feat".to_string(),
             vec![GraphEdge::direct("base".to_string())],
@@ -444,24 +459,24 @@ mod tests {
         edges.insert("base".to_string(), vec![]);
 
         let heads = BookmarkGraph::find_head_bookmarks(&edges);
-        assert_eq!(heads, HashSet::from(["feat".to_string()]));
+        assert_eq!(heads, vec!["feat".to_string()]);
     }
 
     #[test]
     fn find_head_bookmarks_multiple_heads() {
-        // "a" -> [], "b" -> [] — both are heads
-        let mut edges = HashMap::new();
+        // "a" -> [], "b" -> [] — both are heads, returned sorted.
+        let mut edges = BTreeMap::new();
         edges.insert("a".to_string(), vec![]);
         edges.insert("b".to_string(), vec![]);
 
         let heads = BookmarkGraph::find_head_bookmarks(&edges);
-        assert_eq!(heads, HashSet::from(["a".to_string(), "b".to_string()]));
+        assert_eq!(heads, vec!["a".to_string(), "b".to_string()]);
     }
 
     #[test]
     fn find_head_bookmarks_diamond() {
         // "top" -> ["left", "right"], "left" -> ["base"], "right" -> ["base"], "base" -> []
-        let mut edges = HashMap::new();
+        let mut edges = BTreeMap::new();
         edges.insert(
             "top".to_string(),
             vec![
@@ -480,7 +495,7 @@ mod tests {
         edges.insert("base".to_string(), vec![]);
 
         let heads = BookmarkGraph::find_head_bookmarks(&edges);
-        assert_eq!(heads, HashSet::from(["top".to_string()]));
+        assert_eq!(heads, vec!["top".to_string()]);
     }
 
     // -- build_bookmark_graph tests --

@@ -131,29 +131,19 @@ impl<'a> BookmarkGraph<'a> {
         Ok(result.into_iter())
     }
 
-    fn find_root_commit(
-        repo: &dyn Repo,
-        trunk: &CommitId,
-        head: &CommitId,
-    ) -> Result<CommitId, BookmarkGraphError> {
-        let trunk_expr = RevsetExpression::commit(trunk.clone());
-        let head_expr = RevsetExpression::commit(head.clone());
-        let roots = trunk_expr.range(&head_expr).roots();
-        let expression = roots.evaluate(repo)?;
-        expression
-            .iter()
-            .next()
-            .and_then(|r| r.ok())
-            .ok_or(BookmarkGraphError::NoRootCommit)
-    }
-
     fn evaluate_branch_commits(
         repo: &dyn Repo,
         trunk: &CommitId,
         head: &CommitId,
     ) -> Result<Vec<GraphNode<CommitId>>, BookmarkGraphError> {
-        let first_commit = Self::find_root_commit(repo, trunk, head)?;
-        let expression = RevsetExpression::commit(first_commit).descendants();
+        // This is equivalent to the following expression in revset language: `descendants(roots(trunk()..@)` 
+        // In this expression, we're retrieving the roots of the current changes (@)
+        // Once the roots are retrieved, we're retrieving the descendants of the roots to build the
+        // graph
+        let trunk_expr = RevsetExpression::commit(trunk.clone());
+        let head_expr = RevsetExpression::commit(head.clone());
+        let roots = trunk_expr.range(&head_expr).roots();
+        let expression = roots.descendants();
         let revset = expression.evaluate(repo)?;
         Ok(reverse_graph(revset.iter_graph(), |id| id).expect("commit graph should be acyclic"))
     }

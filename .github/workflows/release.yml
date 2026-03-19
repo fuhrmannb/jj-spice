@@ -30,17 +30,18 @@ jobs:
       - name: Install cargo-zigbuild
         run: cargo install --locked cargo-zigbuild
 
-      - name: Install Chocolatey (via Mono)
-        run: |
-          sudo apt-get update && sudo apt-get install -y mono-runtime
-          curl -L -o /tmp/choco.nupkg https://github.com/chocolatey/choco/releases/download/1.4.0/chocolatey.1.4.0.nupkg
-          sudo mkdir -p /opt/chocolatey
-          sudo unzip -o /tmp/choco.nupkg -d /opt/chocolatey
-          sudo bash -c 'cat > /usr/local/bin/choco << "WRAPPER"
-          #!/bin/bash
-          mono /opt/chocolatey/tools/chocolateyInstall/choco.exe "$@"
-          WRAPPER'
-          sudo chmod +x /usr/local/bin/choco
+      # TODO: support Chocolatey later
+      # - name: Install Chocolatey (via Mono)
+      #   run: |
+      #     sudo apt-get update && sudo apt-get install -y mono-runtime
+      #     curl -L -o /tmp/choco.nupkg https://github.com/chocolatey/choco/releases/download/1.4.0/chocolatey.1.4.0.nupkg
+      #     sudo mkdir -p /opt/chocolatey
+      #     sudo unzip -o /tmp/choco.nupkg -d /opt/chocolatey
+      #     sudo bash -c 'cat > /usr/local/bin/choco << "WRAPPER"
+      #     #!/bin/bash
+      #     mono /opt/chocolatey/tools/chocolateyInstall/choco.exe "$@"
+      #     WRAPPER'
+      #     sudo chmod +x /usr/local/bin/choco
 
       - name: Download macOS SDK
         run: curl -L https://github.com/phracker/MacOSX-SDKs/releases/download/11.3/MacOSX11.3.sdk.tar.xz | tar -xJ -C /tmp
@@ -54,7 +55,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
           GH_PAT: ${{ secrets.GH_PAT }}
-          CHOCOLATEY_API_KEY: ${{ secrets.CHOCOLATEY_API_KEY }}
+          # CHOCOLATEY_API_KEY: ${{ secrets.CHOCOLATEY_API_KEY }}
           SDKROOT: /tmp/MacOSX11.3.sdk
 
       - name: Publish jj-spice-lib to crates.io

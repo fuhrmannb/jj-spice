@@ -7,13 +7,14 @@ use jj_lib::git::{self, GitBranchPushTargets};
 use jj_lib::ref_name::{RefNameBuf, RemoteNameBuf};
 use jj_lib::refs::{BookmarkPushAction, BookmarkPushUpdate, classify_bookmark_push_action};
 use jj_spice_lib::bookmark::Bookmark;
-
-use crate::commands::env::SpiceEnv;
 use jj_spice_lib::bookmark::graph::BookmarkGraph;
+use jj_spice_lib::comments::Comment;
 use jj_spice_lib::forge::{CreateParams, Forge};
 use jj_spice_lib::protos::change_request::{ChangeRequests, ForgeMeta};
 use jj_spice_lib::store::SpiceStore;
 use jj_spice_lib::store::change_request::ChangeRequestStore;
+
+use crate::commands::env::SpiceEnv;
 
 /// Create change requests for each bookmark in the current stack (trunk..@).
 pub async fn run(
@@ -118,6 +119,8 @@ pub async fn run(
     // Save the CRs to the store.
     cr_store.save(&state)?;
 
+    let comment = Comment::new(&graph, &state);
+    println!("{:?}", comment.to_string());
     Ok(())
 }
 

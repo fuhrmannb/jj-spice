@@ -381,6 +381,24 @@ impl<'a> BookmarkGraph<'a> {
 }
 
 #[cfg(test)]
+impl<'a> BookmarkGraph<'a> {
+    /// Build a minimal graph for unit-testing code that reads
+    /// `root_bookmarks` and `descendants_for()` (e.g. `Comment::to_string`).
+    pub(crate) fn for_testing(
+        root_bookmarks: Vec<String>,
+        descendants: BTreeMap<String, Vec<GraphEdge<String>>>,
+    ) -> Self {
+        Self {
+            nodes: BTreeMap::new(),
+            edges: BTreeMap::new(),
+            descendants,
+            head_bookmarks: Vec::new(),
+            root_bookmarks,
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use jj_lib::op_store::{LocalRemoteRefTarget, RefTarget};

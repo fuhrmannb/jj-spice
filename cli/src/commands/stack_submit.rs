@@ -128,9 +128,16 @@ fn check_untracked_changes(
     bookmark: &Bookmark,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let remote = env.get_default_remote();
-    let local_remote_target = bookmark
-        .remote_ref(&remote)
-        .ok_or_else(|| format!("No remote ref found for bookmark {}", bookmark.name()))?;
+    let local_remote_target = bookmark.remote_ref(&remote).ok_or_else(|| {
+        let _ = writeln!(
+            ui.hint_default(),
+            "No remote ref found for bookmark {name}. Run `jj bookmark track {name} --remote={remote}` to \
+             track it.",
+            name = bookmark.name(),
+            remote = remote.as_symbol(),
+        );
+        format!("No remote ref found for bookmark {}", bookmark.name())
+    })?;
     match classify_bookmark_push_action(local_remote_target) {
         BookmarkPushAction::AlreadyMatches => {}
         BookmarkPushAction::Update(push_update) => {

@@ -46,7 +46,7 @@ pub async fn run(
     trunk: &CommitId,
     head: &CommitId,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let graph = BookmarkGraph::new(env.repo.as_ref(), trunk, head)?;
+    let graph = BookmarkGraph::build_active_graph(env.repo.as_ref(), trunk, head)?;
     let DetectionResult {
         mut forges,
         unmatched,

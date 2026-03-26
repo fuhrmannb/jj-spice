@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io::Write;
 
+use jj_cli::cli_util::RevisionArg;
 use jj_cli::formatter::Formatter;
 use jj_cli::graphlog::{GraphStyle, get_graphlog};
 use jj_lib::backend::CommitId;
@@ -42,6 +43,8 @@ const SPICE_COLOR_DEFAULTS_MODERN: &str = r##"
 "spice status_merged cap" = { fg = "#A371F7", bg = "default", bold = false }
 "spice status_unknown" = { fg = "#ffffff", bg = "bright black", bold = false }
 "spice status_unknown cap" = { fg = "bright black", bg = "default", bold = false }
+"spice current" = { fg = "green", bold = true }
+"spice nearby" = { fg = "green", bold = true }
 "##;
 
 /// Default color rules for `stack log` output (classic mode).
@@ -61,6 +64,8 @@ const SPICE_COLOR_DEFAULTS_CLASSIC: &str = r##"
 "spice status_closed" = { fg = "#DA3743", bold = true }
 "spice status_merged" = { fg = "#A371F7", bold = true }
 "spice status_unknown" = { fg = "bright black", bold = true }
+"spice current" = { fg = "green", bold = true }
+"spice nearby" = { fg = "green", bold = true }
 "##;
 
 /// Left cap of a pill-shaped status badge (Powerline rounded glyph, modern mode).
@@ -75,8 +80,25 @@ const PILL_RIGHT_CLASSIC: &str = "]";
 /// Node symbol used for every bookmark in the graph.
 const NODE_SYMBOL: &str = "\u{25cb}";
 
+/// Node symbol for a bookmark whose commit is exactly the working copy (`@`).
+const CURRENT_SYMBOL: &str = "@";
+
+/// Node symbol for a bookmark whose segment contains the working copy
+/// (i.e. `@` sits between this bookmark's parents and the bookmark itself).
+const NEARBY_SYMBOL: &str = "\u{25c9}";
+
 /// Node symbol used for the trunk (immutable) bookmark.
 const TRUNK_SYMBOL: &str = "\u{25c6}";
+
+/// Relationship between a bookmark node and the working copy commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WcPosition {
+    /// The working copy commit is exactly on this bookmark's commit.
+    Current,
+    /// The working copy commit is between this bookmark's parent bookmarks
+    /// and this bookmark (belongs to this bookmark's segment).
+    Nearby,
+}
 
 /// Show the bookmark DAG with change request status.
 ///
@@ -105,6 +127,9 @@ pub async fn run(
     // Detect forges (read-only, no prompting for unmatched remotes).
     let detection = detect_forge_result(env);
 
+    // Resolve the working copy commit (if available) for position marking.
+    let wc_commit = env.resolve_single_rev(&RevisionArg::AT).ok();
+
     // Collect nodes and fetch live CR data.
     let nodes: Vec<&BookmarkNode> = graph.iter_graph()?.collect();
     let live_crs = fetch_live_crs(&nodes, &cr_state, &detection).await;
@@ -117,6 +142,7 @@ pub async fn run(
         trunk_name.as_deref(),
         &cr_state,
         &live_crs,
+        wc_commit.as_ref(),
     )?;
 
     Ok(())
@@ -151,6 +177,70 @@ fn detect_forge_result(env: &SpiceEnv) -> DetectionResult {
         forges: HashMap::new(),
         unmatched: Vec::new(),
     })
+}
+
+/// Determine which bookmark (if any) contains the working copy commit and how.
+///
+/// Returns a map from bookmark name to its [`WcPosition`]:
+/// - [`WcPosition::Current`]: `wc_id` is exactly one of the bookmark's commit IDs.
+/// - [`WcPosition::Nearby`]: `wc_id` is an ancestor of the bookmark's commit and
+///   a descendant of every parent bookmark's commit — meaning `@` sits inside
+///   this bookmark's segment of the graph.
+///
+/// At most one bookmark is returned; direct matches take priority over indirect.
+fn find_wc_bookmark(
+    nodes: &[&BookmarkNode],
+    graph: &BookmarkGraph,
+    repo: &dyn Repo,
+    wc_id: &CommitId,
+) -> HashMap<String, WcPosition> {
+    let mut result = HashMap::new();
+
+    // 1. Direct match: @ is exactly on a bookmark's commit.
+    for node in nodes {
+        if node.commits().contains(wc_id) {
+            result.insert(node.name().to_string(), WcPosition::Current);
+            return result;
+        }
+    }
+
+    // 2. Indirect match: @ is between a bookmark's parents and the bookmark.
+    //    A bookmark qualifies when:
+    //    - @ is a strict ancestor of the bookmark's commit, AND
+    //    - @ is a strict descendant of every parent bookmark's commit
+    //      (or the bookmark has no parents, i.e. it is a root of the stack).
+    let index = repo.index();
+    for node in nodes {
+        let Some(node_commit) = node.commits().first() else {
+            continue;
+        };
+        // @ must be a strict ancestor of this bookmark's commit.
+        let Ok(is_anc) = index.is_ancestor(wc_id, node_commit) else {
+            continue;
+        };
+        if !is_anc || wc_id == node_commit {
+            continue;
+        }
+
+        // @ must be a strict descendant of every parent bookmark's commit.
+        let parent_edges = graph.edges_for(node.name());
+        let all_parents_below = parent_edges.iter().all(|edge| {
+            // Find the parent node's commit.
+            nodes
+                .iter()
+                .find(|n| n.name() == edge.target)
+                .and_then(|parent| parent.commits().first())
+                .and_then(|parent_commit| index.is_ancestor(parent_commit, wc_id).ok())
+                .is_some_and(|is_anc| is_anc && edge.target != node.name())
+        });
+
+        if all_parents_below || parent_edges.is_empty() {
+            result.insert(node.name().to_string(), WcPosition::Nearby);
+            return result;
+        }
+    }
+
+    result
 }
 
 /// Fetch live change request data for each bookmark that has stored metadata.
@@ -246,9 +336,14 @@ fn render_graph(
     trunk_name: Option<&str>,
     cr_state: &jj_spice_lib::protos::change_request::ChangeRequests,
     live_crs: &HashMap<String, Result<Box<dyn ChangeRequest>, String>>,
+    wc_commit: Option<&CommitId>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mode = env.output_mode;
 
+    // Determine which bookmark (if any) holds the working copy.
+    let wc_positions = wc_commit
+        .map(|wc| find_wc_bookmark(nodes, graph, env.repo.as_ref(), wc))
+        .unwrap_or_default();
     // Build a formatter factory that includes spice color defaults.
     // Respects --color=never by falling back to plain text.
     let factory = if env.ui.color() {
@@ -269,6 +364,8 @@ fn render_graph(
 
         for node in &reversed {
             let name = node.name();
+            let wc_pos = wc_positions.get(name).copied();
+
             // Edges already point child → parent, matching graphlog's
             // expectation of pointing to nodes rendered later (below).
             let mut edges = graph.edges_for(name);
@@ -288,7 +385,9 @@ fn render_graph(
             }
             let text = String::from_utf8_lossy(&text_buf);
 
-            graphlog.add_node(&name.to_string(), &edges, NODE_SYMBOL, &text)?;
+            // Render the node symbol with positional color when applicable.
+            let symbol = render_node_symbol(&factory, wc_pos);
+            graphlog.add_node(&name.to_string(), &edges, &symbol, &text)?;
         }
 
         // Render trunk as the terminal node at the bottom.
@@ -333,6 +432,39 @@ fn inject_color_defaults(
     let layer = ConfigLayer::parse(ConfigSource::Default, defaults)?;
     config.add_layer(layer);
     Ok(config)
+}
+
+/// Render a colored node symbol for the graphlog.
+///
+/// When `wc_pos` is set the symbol glyph is changed (`@` for current,
+/// `◉` for nearby) and wrapped in the corresponding `"spice current"` or
+/// `"spice nearby"` color label. Otherwise the default `◯` symbol is
+/// returned without any color markup.
+fn render_node_symbol(
+    factory: &jj_cli::formatter::FormatterFactory,
+    wc_pos: Option<WcPosition>,
+) -> String {
+    let (glyph, label) = match wc_pos {
+        Some(WcPosition::Current) => (CURRENT_SYMBOL, Some("current")),
+        Some(WcPosition::Nearby) => (NEARBY_SYMBOL, Some("nearby")),
+        None => (NODE_SYMBOL, None),
+    };
+
+    if let Some(lbl) = label {
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut fmt = factory.new_formatter(&mut buf);
+            fmt.push_label("spice");
+            fmt.push_label(lbl);
+            // write! error is non-fatal — fall back to plain glyph.
+            let _ = write!(fmt, "{glyph}");
+            fmt.pop_label();
+            fmt.pop_label();
+        }
+        String::from_utf8(buf).unwrap_or_else(|_| glyph.to_string())
+    } else {
+        glyph.to_string()
+    }
 }
 
 /// Render the node text for a single bookmark (always 2 lines).
@@ -807,5 +939,41 @@ mod tests {
             assert!(lines[0].contains("?"));
             assert_eq!(text.matches('\n').count(), 2);
         }
+    }
+
+    // -- WcPosition / node symbol tests --
+
+    #[test]
+    fn node_symbol_current() {
+        assert_eq!(CURRENT_SYMBOL, "@");
+    }
+
+    #[test]
+    fn node_symbol_nearby() {
+        assert_eq!(NEARBY_SYMBOL, "\u{25c9}");
+    }
+
+    #[test]
+    fn render_node_symbol_plain_text() {
+        // In plain-text mode the symbol is the raw glyph without color.
+        let factory = jj_cli::formatter::FormatterFactory::plain_text();
+        assert_eq!(render_node_symbol(&factory, None), NODE_SYMBOL);
+        assert_eq!(
+            render_node_symbol(&factory, Some(WcPosition::Current)),
+            CURRENT_SYMBOL
+        );
+        assert_eq!(
+            render_node_symbol(&factory, Some(WcPosition::Nearby)),
+            NEARBY_SYMBOL
+        );
+    }
+
+    #[test]
+    fn render_node_symbol_normal_has_no_ansi() {
+        // Normal nodes should never contain escape sequences, even when
+        // a color factory is theoretically available.
+        let factory = jj_cli::formatter::FormatterFactory::plain_text();
+        let symbol = render_node_symbol(&factory, None);
+        assert!(!symbol.contains('\x1b'), "plain symbol should have no ANSI");
     }
 }

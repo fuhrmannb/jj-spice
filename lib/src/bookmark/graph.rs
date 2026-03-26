@@ -116,6 +116,52 @@ impl<'a> BookmarkGraph<'a> {
         Self::build(repo, trunk, &heads_expr)
     }
 
+    /// Build a bookmark graph for the active stack using the revset
+    /// `descendants(roots(trunk()..@))`.
+    ///
+    /// This resolves the **full** stack even when the working copy (`@`) sits
+    /// in the middle. A plain `trunk..@` would miss bookmarks after `@`:
+    ///
+    /// ```text
+    ///   trunk ── A ── B(@) ── C
+    ///                          ^^ missed by trunk..@
+    /// ```
+    ///
+    /// The revset works in three steps:
+    /// 1. `trunk..@`         — commits between trunk and the working copy
+    /// 2. `roots(…)`         — the root commits of that set (closest to trunk)
+    /// 3. `descendants(…)`   — ALL descendants of those roots
+    ///
+    /// This guarantees that every bookmark in the stack is included,
+    /// regardless of where `@` points.
+    pub fn build_active_graph(
+        repo: &'a (dyn Repo + 'a),
+        trunk: &CommitId,
+        head: &CommitId,
+    ) -> Result<Self, BookmarkGraphError> {
+        let bookmarks_per_commit = Self::build_bookmark_commit_map(repo);
+
+        // Build the revset: descendants(roots(trunk..head))
+        let trunk_expr = RevsetExpression::commit(trunk.clone());
+        let head_expr = RevsetExpression::commit(head.clone());
+        let expression = trunk_expr.range(&head_expr).roots().descendants();
+
+        let revset = expression.evaluate(repo)?;
+        let reversed =
+            reverse_graph(revset.iter_graph(), |id| id).expect("commit graph should be acyclic");
+        let (nodes, edges, descendants) =
+            Self::build_bookmark_graph(&reversed, &bookmarks_per_commit);
+        let head_bookmarks = Self::find_head_bookmarks(&edges);
+        let root_bookmarks = Self::find_root_bookmarks(&nodes);
+        Ok(Self {
+            nodes,
+            edges,
+            descendants,
+            head_bookmarks,
+            root_bookmarks,
+        })
+    }
+
     /// Build a bookmark graph covering **all** local bookmarks between `trunk`
     /// and the heads of every local bookmark.
     ///
@@ -209,6 +255,7 @@ impl<'a> BookmarkGraph<'a> {
             Self::build_bookmark_graph(&reversed, &bookmarks_per_commit);
         let head_bookmarks = Self::find_head_bookmarks(&edges);
         let root_bookmarks = Self::find_root_bookmarks(&nodes);
+
         Ok(Self {
             nodes,
             edges,
@@ -235,6 +282,8 @@ impl<'a> BookmarkGraph<'a> {
         Ok(reverse_graph(revset.iter_graph(), |id| id).expect("commit graph should be acyclic"))
     }
 
+    /// Build a map from commit ID to all bookmarks that point to it.
+    /// CommitID -> Vec<Bookmark>
     fn build_bookmark_commit_map(
         repo: &'a (dyn Repo + 'a),
     ) -> HashMap<CommitId, Vec<Arc<Bookmark<'a>>>> {

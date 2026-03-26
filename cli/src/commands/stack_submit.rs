@@ -33,7 +33,7 @@ pub async fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let store = &env.store;
     let cr_store = ChangeRequestStore::new(store);
-    let graph = BookmarkGraph::new(env.repo.as_ref(), trunk, head)?;
+    let graph = BookmarkGraph::build_active_graph(env.repo.as_ref(), trunk, head)?;
     let text_editor = TextEditor::from_settings(&env.settings)?;
     let mut state = cr_store.load()?;
 

@@ -17,6 +17,7 @@ use cli::{Cli, SpiceCommand, StackCommand, UtilCommand};
 use env::SpiceEnv;
 use jj_cli::cli_util::RevisionArg;
 use jj_lib::repo::Repo as _;
+use jj_spice_lib::bookmark::resolve_commit_id;
 use jj_spice_lib::forge::detect::detect_forges;
 
 /// Dispatch to the appropriate command.
@@ -67,7 +68,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                             .repo
                             .view()
                             .bookmarks()
-                            .find(|(_, target)| target.local_target.as_normal() == Some(&trunk))
+                            .find(|(_, target)| resolve_commit_id(&target) == Some(&trunk))
                             .map(|(name, _)| name.as_str().to_string())
                             .ok_or("no bookmark found at trunk commit")?;
 

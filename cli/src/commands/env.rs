@@ -34,6 +34,35 @@ pub(crate) type ResolvedForge = (Box<dyn Forge>, Option<String>);
 
 use jj_spice_lib::store::SpiceStore;
 
+/// Controls terminal output fidelity.
+///
+/// - **Modern** (default): Nerd Font Powerline glyphs for status pills,
+///   OSC 8 terminal hyperlinks.
+/// - **Classic**: ASCII brackets `[Status]` with foreground-only colors,
+///   plain-text URL fallbacks. Safe for terminals without Nerd Fonts.
+///
+/// Configured via `spice.output` in jj config (`"modern"` or `"classic"`).
+/// Defaults to `Modern` when unset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum OutputMode {
+    #[default]
+    Modern,
+    Classic,
+}
+
+impl OutputMode {
+    /// Resolve the output mode from the jj config stack.
+    ///
+    /// Reads `spice.output` and maps `"classic"` → [`Classic`](Self::Classic),
+    /// anything else (including absent) → [`Modern`](Self::Modern).
+    pub(crate) fn from_config(config: &jj_lib::config::StackedConfig) -> Self {
+        match config.get::<String>(["spice", "output"]) {
+            Ok(value) if value.eq_ignore_ascii_case("classic") => Self::Classic,
+            _ => Self::Modern,
+        }
+    }
+}
+
 /// Shared context built once from the jj config pipeline and workspace.
 pub(crate) struct SpiceEnv {
     /// Terminal UI handle for user-facing output and diagnostics.
@@ -50,6 +79,8 @@ pub(crate) struct SpiceEnv {
     pub(crate) config_env: ConfigEnv,
     /// Immutable store for change requests.
     pub(crate) store: SpiceStore,
+    /// Terminal output fidelity (modern vs classic).
+    pub(crate) output_mode: OutputMode,
     path_converter: RepoPathUiConverter,
     user_email: String,
     revset_aliases: RevsetAliasesMap,
@@ -100,6 +131,9 @@ impl SpiceEnv {
         // 6. Build the store.
         let store = SpiceStore::init_at(workspace.repo_path()).expect("failed to init store");
 
+        // 7. Resolve output mode from config.
+        let output_mode = OutputMode::from_config(&config);
+
         Ok(Self {
             ui,
             repo,
@@ -107,11 +141,12 @@ impl SpiceEnv {
             git_settings,
             workspace,
             config_env,
+            store,
+            output_mode,
             path_converter,
             user_email,
             revset_aliases,
             revset_extensions,
-            store,
         })
     }
 

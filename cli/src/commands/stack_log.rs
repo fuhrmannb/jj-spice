@@ -8,7 +8,7 @@ use jj_lib::config::{ConfigLayer, ConfigSource};
 use jj_lib::graph::GraphEdge;
 use jj_lib::repo::Repo;
 
-use crate::commands::env::SpiceEnv;
+use crate::commands::env::{OutputMode, SpiceEnv};
 use jj_spice_lib::bookmark::graph::{BookmarkGraph, BookmarkNode};
 use jj_spice_lib::forge::detect::{DetectionResult, detect_forges};
 use jj_spice_lib::forge::{ChangeRequest, ChangeStatus, Forge};
@@ -17,11 +17,14 @@ use jj_spice_lib::protos::change_request::forge_meta::Forge as ForgeOneof;
 use jj_spice_lib::store::SpiceStore;
 use jj_spice_lib::store::change_request::ChangeRequestStore;
 
-/// Default color rules for `stack log` output.
+/// Default color rules for `stack log` output (modern mode).
 ///
 /// Injected at [`ConfigSource::Default`] priority so users can override
 /// any of these in their own jj config under `[colors]`.
-const SPICE_COLOR_DEFAULTS: &str = r##"
+///
+/// Modern mode uses Powerline pill caps with background-colored inner text,
+/// requiring the separate `"cap"` sub-label for the glyph transitions.
+const SPICE_COLOR_DEFAULTS_MODERN: &str = r##"
 [colors]
 "spice bookmark" = "magenta"
 "spice cr_id" = { fg = "yellow" }
@@ -41,10 +44,33 @@ const SPICE_COLOR_DEFAULTS: &str = r##"
 "spice status_unknown cap" = { fg = "bright black", bg = "default", bold = false }
 "##;
 
-/// Left cap of a pill-shaped status badge (Powerline rounded glyph).
-const PILL_LEFT: &str = "\u{e0b6}";
-/// Right cap of a pill-shaped status badge (Powerline rounded glyph).
-const PILL_RIGHT: &str = "\u{e0b4}";
+/// Default color rules for `stack log` output (classic mode).
+///
+/// Classic mode renders status as `[Open]` with foreground-only coloring,
+/// so no `"cap"` sub-label or background colors are needed.
+const SPICE_COLOR_DEFAULTS_CLASSIC: &str = r##"
+[colors]
+"spice bookmark" = "magenta"
+"spice cr_id" = { fg = "yellow" }
+"spice cr_title" = { fg = "default" }
+"spice url" = { fg = "bright blue", underline = true }
+"spice trunk" = "cyan"
+"spice no_cr" = { fg = "bright black" }
+"spice status_open" = { fg = "#238636", bold = true }
+"spice status_draft" = { fg = "#555555", bold = true }
+"spice status_closed" = { fg = "#DA3743", bold = true }
+"spice status_merged" = { fg = "#A371F7", bold = true }
+"spice status_unknown" = { fg = "bright black", bold = true }
+"##;
+
+/// Left cap of a pill-shaped status badge (Powerline rounded glyph, modern mode).
+const PILL_LEFT_MODERN: &str = "\u{e0b6}";
+/// Right cap of a pill-shaped status badge (Powerline rounded glyph, modern mode).
+const PILL_RIGHT_MODERN: &str = "\u{e0b4}";
+/// Left bracket for status badge (classic mode).
+const PILL_LEFT_CLASSIC: &str = "[";
+/// Right bracket for status badge (classic mode).
+const PILL_RIGHT_CLASSIC: &str = "]";
 
 /// Node symbol used for every bookmark in the graph.
 const NODE_SYMBOL: &str = "\u{25cb}";
@@ -221,10 +247,12 @@ fn render_graph(
     cr_state: &jj_spice_lib::protos::change_request::ChangeRequests,
     live_crs: &HashMap<String, Result<Box<dyn ChangeRequest>, String>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let mode = env.output_mode;
+
     // Build a formatter factory that includes spice color defaults.
     // Respects --color=never by falling back to plain text.
     let factory = if env.ui.color() {
-        let config = inject_color_defaults(env)?;
+        let config = inject_color_defaults(env, mode)?;
         jj_cli::formatter::FormatterFactory::color(&config, false)?
     } else {
         jj_cli::formatter::FormatterFactory::plain_text()
@@ -256,7 +284,7 @@ fn render_graph(
             let mut text_buf: Vec<u8> = Vec::new();
             {
                 let mut fmt = factory.new_formatter(&mut text_buf);
-                render_node_text(&mut *fmt, node, cr_state, live_crs)?;
+                render_node_text(&mut *fmt, node, cr_state, live_crs, mode)?;
             }
             let text = String::from_utf8_lossy(&text_buf);
 
@@ -291,12 +319,18 @@ fn render_graph(
 /// Build a config stack with spice color defaults injected.
 ///
 /// The defaults are added at [`ConfigSource::Default`] priority so any
-/// user-defined `[colors]` rules take precedence.
+/// user-defined `[colors]` rules take precedence. The set of defaults
+/// depends on the active [`OutputMode`].
 fn inject_color_defaults(
     env: &SpiceEnv,
+    mode: OutputMode,
 ) -> Result<jj_lib::config::StackedConfig, Box<dyn std::error::Error>> {
     let mut config = env.config().clone();
-    let layer = ConfigLayer::parse(ConfigSource::Default, SPICE_COLOR_DEFAULTS)?;
+    let defaults = match mode {
+        OutputMode::Modern => SPICE_COLOR_DEFAULTS_MODERN,
+        OutputMode::Classic => SPICE_COLOR_DEFAULTS_CLASSIC,
+    };
+    let layer = ConfigLayer::parse(ConfigSource::Default, defaults)?;
     config.add_layer(layer);
     Ok(config)
 }
@@ -310,6 +344,7 @@ fn render_node_text(
     node: &BookmarkNode,
     cr_state: &jj_spice_lib::protos::change_request::ChangeRequests,
     live_crs: &HashMap<String, Result<Box<dyn ChangeRequest>, String>>,
+    mode: OutputMode,
 ) -> std::io::Result<()> {
     let name = node.name();
     let meta = cr_state.get(name);
@@ -325,15 +360,15 @@ fn render_node_text(
         // Live CR data available.
         (Some(_), Some(Ok(cr))) => {
             write!(fmt, " ")?;
-            render_status_pill(fmt, Some(cr.status()))?;
+            render_status_pill(fmt, Some(cr.status()), mode)?;
             write!(fmt, " ")?;
-            write_hyperlink(fmt, cr.url(), &cr.link_label())?;
+            write_hyperlink(fmt, cr.url(), &cr.link_label(), mode)?;
         }
         // Stored metadata but forge API failed — show stored ID + unknown pill.
         (Some(meta), Some(Err(_))) => {
             let id = format_meta_id(meta);
             write!(fmt, " ")?;
-            render_status_pill(fmt, None)?;
+            render_status_pill(fmt, None, mode)?;
             write!(fmt, " ")?;
             fmt.push_label("cr_id");
             write!(fmt, "#{id}")?;
@@ -343,7 +378,7 @@ fn render_node_text(
         (Some(meta), None) => {
             let id = format_meta_id(meta);
             write!(fmt, " ")?;
-            render_status_pill(fmt, None)?;
+            render_status_pill(fmt, None, mode)?;
             write!(fmt, " ")?;
             fmt.push_label("cr_id");
             write!(fmt, "#{id}")?;
@@ -377,16 +412,22 @@ fn render_node_text(
     Ok(())
 }
 
-/// Write a clickable OSC 8 hyperlink to the formatter.
+/// Write a hyperlink to the formatter.
 ///
-/// In color mode, emits `ESC]8;;URL ST <visible_text> ESC]8;; ST` which
-/// modern terminals render as a clickable link. The visible text is styled
-/// with the `"url"` label.
+/// In **modern** color mode, emits OSC 8 terminal hyperlinks
+/// (`ESC]8;;URL ST <visible_text> ESC]8;; ST`) that modern terminals
+/// render as clickable links. The visible text is styled with the `"url"`
+/// label.
 ///
-/// In plain-text mode (or when the formatter doesn't support color), writes
-/// the visible text followed by the URL in parentheses as a fallback.
-fn write_hyperlink(fmt: &mut dyn Formatter, url: &str, text: &str) -> std::io::Result<()> {
-    if fmt.maybe_color() {
+/// In **classic** mode (or plain-text mode), writes the visible text
+/// followed by the URL in parentheses as a readable fallback.
+fn write_hyperlink(
+    fmt: &mut dyn Formatter,
+    url: &str,
+    text: &str,
+    mode: OutputMode,
+) -> std::io::Result<()> {
+    if mode == OutputMode::Modern && fmt.maybe_color() {
         // OSC 8 opener: ESC ] 8 ; ; URL ST
         // ST (String Terminator) = ESC backslash
         {
@@ -403,21 +444,24 @@ fn write_hyperlink(fmt: &mut dyn Formatter, url: &str, text: &str) -> std::io::R
             write!(raw, "\x1b]8;;\x1b\\")?;
         }
     } else {
-        // Plain-text fallback: visible text (URL)
+        // Classic / plain-text fallback: visible text (URL)
         write!(fmt, "{text} ({url})")?;
     }
     Ok(())
 }
 
-/// Render a pill-shaped status badge using Powerline rounded glyphs.
+/// Render a status badge.
 ///
-/// The pill has three parts with distinct labels:
-/// - Left cap: fg = pill color, default bg → `"status_<x> cap"` label
-/// - Inner text: fg = white, bg = pill color, bold → `"status_<x>"` label
-/// - Right cap: same as left cap
+/// In **modern** mode, renders a pill-shaped badge using Powerline rounded
+/// glyphs with background-colored inner text and `"cap"` sub-labels for
+/// the glyph transitions.
+///
+/// In **classic** mode, renders `[Status]` using foreground-only color
+/// and ASCII brackets.
 fn render_status_pill(
     fmt: &mut dyn Formatter,
     status: Option<ChangeStatus>,
+    mode: OutputMode,
 ) -> std::io::Result<()> {
     let (label, text) = match status {
         Some(ChangeStatus::Open) => ("status_open", "Open"),
@@ -427,19 +471,28 @@ fn render_status_pill(
         None => ("status_unknown", "?"),
     };
 
-    // Left cap: colored glyph on default background.
     fmt.push_label(label);
-    fmt.push_label("cap");
-    write!(fmt, "{PILL_LEFT}")?;
-    fmt.pop_label();
 
-    // Inner text: white on colored background.
-    write!(fmt, " {text} ")?;
+    match mode {
+        OutputMode::Modern => {
+            // Left cap: colored glyph on default background.
+            fmt.push_label("cap");
+            write!(fmt, "{PILL_LEFT_MODERN}")?;
+            fmt.pop_label();
 
-    // Right cap: colored glyph on default background.
-    fmt.push_label("cap");
-    write!(fmt, "{PILL_RIGHT}")?;
-    fmt.pop_label();
+            // Inner text: white on colored background.
+            write!(fmt, " {text} ")?;
+
+            // Right cap: colored glyph on default background.
+            fmt.push_label("cap");
+            write!(fmt, "{PILL_RIGHT_MODERN}")?;
+            fmt.pop_label();
+        }
+        OutputMode::Classic => {
+            // Simple bracketed badge with fg-only color.
+            write!(fmt, "{PILL_LEFT_CLASSIC}{text}{PILL_RIGHT_CLASSIC}")?;
+        }
+    }
 
     fmt.pop_label();
     Ok(())
@@ -460,6 +513,9 @@ mod tests {
     use jj_lib::op_store::{LocalRemoteRefTarget, RefTarget};
     use jj_spice_lib::forge::github::GitHubChangeRequest;
     use jj_spice_lib::protos::change_request::{ChangeRequests, GitHubMeta};
+
+    /// Map from bookmark name to its live change request fetch result.
+    type LiveCrMap = HashMap<String, Result<Box<dyn ChangeRequest>, String>>;
 
     fn make_node(name: &str) -> BookmarkNode<'static> {
         BookmarkNode::new(jj_spice_lib::bookmark::Bookmark::new(
@@ -495,46 +551,85 @@ mod tests {
         assert_eq!(format_meta_id(&meta), "?");
     }
 
-    // -- render_status_pill tests (plain text, no color) --
+    // -- render_status_pill tests (plain text) --
 
-    fn render_pill_plain(status: Option<ChangeStatus>) -> String {
+    fn render_pill_plain(status: Option<ChangeStatus>, mode: OutputMode) -> String {
         let factory = jj_cli::formatter::FormatterFactory::plain_text();
         let mut buf = Vec::new();
         {
             let mut fmt = factory.new_formatter(&mut buf);
-            render_status_pill(&mut *fmt, status).unwrap();
+            render_status_pill(&mut *fmt, status, mode).unwrap();
         }
         String::from_utf8(buf).unwrap()
     }
 
     #[test]
-    fn pill_open_plain_text() {
-        let text = render_pill_plain(Some(ChangeStatus::Open));
-        assert_eq!(text, format!("{PILL_LEFT} Open {PILL_RIGHT}"));
+    fn pill_open_modern() {
+        let text = render_pill_plain(Some(ChangeStatus::Open), OutputMode::Modern);
+        assert_eq!(text, format!("{PILL_LEFT_MODERN} Open {PILL_RIGHT_MODERN}"));
     }
 
     #[test]
-    fn pill_draft_plain_text() {
-        let text = render_pill_plain(Some(ChangeStatus::Draft));
-        assert_eq!(text, format!("{PILL_LEFT} Draft {PILL_RIGHT}"));
+    fn pill_draft_modern() {
+        let text = render_pill_plain(Some(ChangeStatus::Draft), OutputMode::Modern);
+        assert_eq!(
+            text,
+            format!("{PILL_LEFT_MODERN} Draft {PILL_RIGHT_MODERN}")
+        );
     }
 
     #[test]
-    fn pill_closed_plain_text() {
-        let text = render_pill_plain(Some(ChangeStatus::Closed));
-        assert_eq!(text, format!("{PILL_LEFT} Closed {PILL_RIGHT}"));
+    fn pill_closed_modern() {
+        let text = render_pill_plain(Some(ChangeStatus::Closed), OutputMode::Modern);
+        assert_eq!(
+            text,
+            format!("{PILL_LEFT_MODERN} Closed {PILL_RIGHT_MODERN}")
+        );
     }
 
     #[test]
-    fn pill_merged_plain_text() {
-        let text = render_pill_plain(Some(ChangeStatus::Merged));
-        assert_eq!(text, format!("{PILL_LEFT} Merged {PILL_RIGHT}"));
+    fn pill_merged_modern() {
+        let text = render_pill_plain(Some(ChangeStatus::Merged), OutputMode::Modern);
+        assert_eq!(
+            text,
+            format!("{PILL_LEFT_MODERN} Merged {PILL_RIGHT_MODERN}")
+        );
     }
 
     #[test]
-    fn pill_unknown_plain_text() {
-        let text = render_pill_plain(None);
-        assert_eq!(text, format!("{PILL_LEFT} ? {PILL_RIGHT}"));
+    fn pill_unknown_modern() {
+        let text = render_pill_plain(None, OutputMode::Modern);
+        assert_eq!(text, format!("{PILL_LEFT_MODERN} ? {PILL_RIGHT_MODERN}"));
+    }
+
+    #[test]
+    fn pill_open_classic() {
+        let text = render_pill_plain(Some(ChangeStatus::Open), OutputMode::Classic);
+        assert_eq!(text, "[Open]");
+    }
+
+    #[test]
+    fn pill_draft_classic() {
+        let text = render_pill_plain(Some(ChangeStatus::Draft), OutputMode::Classic);
+        assert_eq!(text, "[Draft]");
+    }
+
+    #[test]
+    fn pill_closed_classic() {
+        let text = render_pill_plain(Some(ChangeStatus::Closed), OutputMode::Classic);
+        assert_eq!(text, "[Closed]");
+    }
+
+    #[test]
+    fn pill_merged_classic() {
+        let text = render_pill_plain(Some(ChangeStatus::Merged), OutputMode::Classic);
+        assert_eq!(text, "[Merged]");
+    }
+
+    #[test]
+    fn pill_unknown_classic() {
+        let text = render_pill_plain(None, OutputMode::Classic);
+        assert_eq!(text, "[?]");
     }
 
     // -- render_node_text tests (plain text) --
@@ -542,30 +637,32 @@ mod tests {
     fn render_node_plain(
         node: &BookmarkNode,
         cr_state: &ChangeRequests,
-        live_crs: &HashMap<String, Result<Box<dyn ChangeRequest>, String>>,
+        live_crs: &LiveCrMap,
+        mode: OutputMode,
     ) -> String {
         let factory = jj_cli::formatter::FormatterFactory::plain_text();
         let mut buf = Vec::new();
         {
             let mut fmt = factory.new_formatter(&mut buf);
-            render_node_text(&mut *fmt, node, cr_state, live_crs).unwrap();
+            render_node_text(&mut *fmt, node, cr_state, live_crs, mode).unwrap();
         }
         String::from_utf8(buf).unwrap()
     }
 
     #[test]
     fn node_text_no_cr() {
-        let node = make_node("feature-a");
-        let cr_state = ChangeRequests::default();
-        let live_crs = HashMap::new();
+        // Output is mode-independent when there is no CR.
+        for mode in [OutputMode::Modern, OutputMode::Classic] {
+            let node = make_node("feature-a");
+            let cr_state = ChangeRequests::default();
+            let live_crs = HashMap::new();
 
-        let text = render_node_plain(&node, &cr_state, &live_crs);
-        // Two lines: bookmark + placeholder, then empty line.
-        assert_eq!(text, "feature-a (no change request)\n\n");
+            let text = render_node_plain(&node, &cr_state, &live_crs, mode);
+            assert_eq!(text, "feature-a (no change request)\n\n");
+        }
     }
 
-    #[test]
-    fn node_text_with_live_cr_layout() {
+    fn make_live_cr_fixtures() -> (BookmarkNode<'static>, ChangeRequests, LiveCrMap) {
         let node = make_node("feature-a");
         let mut cr_state = ChangeRequests::default();
         cr_state.set(
@@ -582,7 +679,7 @@ mod tests {
                 })),
             },
         );
-        let mut live_crs: HashMap<String, Result<Box<dyn ChangeRequest>, String>> = HashMap::new();
+        let mut live_crs: LiveCrMap = HashMap::new();
         live_crs.insert(
             "feature-a".into(),
             Ok(Box::new(GitHubChangeRequest {
@@ -602,17 +699,36 @@ mod tests {
                 url: "https://github.com/owner/repo/pull/1".into(),
             })),
         );
+        (node, cr_state, live_crs)
+    }
 
-        let text = render_node_plain(&node, &cr_state, &live_crs);
+    #[test]
+    fn node_text_with_live_cr_modern() {
+        let (node, cr_state, live_crs) = make_live_cr_fixtures();
+
+        let text = render_node_plain(&node, &cr_state, &live_crs, OutputMode::Modern);
         let lines: Vec<&str> = text.lines().collect();
-        // Line 1: bookmark + pill + link.
+        // Modern: Powerline pill + plain-text link fallback (no color formatter).
         assert_eq!(
             lines[0],
             format!(
-                "feature-a {PILL_LEFT} Open {PILL_RIGHT} github.com:owner/repo#1 (https://github.com/owner/repo/pull/1)"
+                "feature-a {PILL_LEFT_MODERN} Open {PILL_RIGHT_MODERN} github.com:owner/repo#1 (https://github.com/owner/repo/pull/1)"
             )
         );
-        // Line 2: CR title.
+        assert_eq!(lines[1], "Add cool feature");
+    }
+
+    #[test]
+    fn node_text_with_live_cr_classic() {
+        let (node, cr_state, live_crs) = make_live_cr_fixtures();
+
+        let text = render_node_plain(&node, &cr_state, &live_crs, OutputMode::Classic);
+        let lines: Vec<&str> = text.lines().collect();
+        // Classic: ASCII brackets + plain-text link.
+        assert_eq!(
+            lines[0],
+            "feature-a [Open] github.com:owner/repo#1 (https://github.com/owner/repo/pull/1)"
+        );
         assert_eq!(lines[1], "Add cool feature");
     }
 
@@ -634,7 +750,7 @@ mod tests {
                 })),
             },
         );
-        let mut live_crs: HashMap<String, Result<Box<dyn ChangeRequest>, String>> = HashMap::new();
+        let mut live_crs: LiveCrMap = HashMap::new();
         live_crs.insert(
             "feat".into(),
             Ok(Box::new(GitHubChangeRequest {
@@ -655,11 +771,12 @@ mod tests {
             })),
         );
 
-        let text = render_node_plain(&node, &cr_state, &live_crs);
-        let first_line = text.lines().next().unwrap();
-        // Draft pill should appear instead of Open.
-        assert!(first_line.contains("Draft"));
-        assert!(!first_line.contains("Open"));
+        for mode in [OutputMode::Modern, OutputMode::Classic] {
+            let text = render_node_plain(&node, &cr_state, &live_crs, mode);
+            let first_line = text.lines().next().unwrap();
+            assert!(first_line.contains("Draft"));
+            assert!(!first_line.contains("Open"));
+        }
     }
 
     #[test]
@@ -682,12 +799,13 @@ mod tests {
         );
         let live_crs = HashMap::new();
 
-        let text = render_node_plain(&node, &cr_state, &live_crs);
-        // Two lines: bookmark + unknown pill + stored ID, then empty line.
-        let lines: Vec<&str> = text.lines().collect();
-        assert!(lines[0].starts_with("feature-b"));
-        assert!(lines[0].contains("#10"));
-        assert!(lines[0].contains("?"));
-        assert_eq!(text.matches('\n').count(), 2);
+        for mode in [OutputMode::Modern, OutputMode::Classic] {
+            let text = render_node_plain(&node, &cr_state, &live_crs, mode);
+            let lines: Vec<&str> = text.lines().collect();
+            assert!(lines[0].starts_with("feature-b"));
+            assert!(lines[0].contains("#10"));
+            assert!(lines[0].contains("?"));
+            assert_eq!(text.matches('\n').count(), 2);
+        }
     }
 }

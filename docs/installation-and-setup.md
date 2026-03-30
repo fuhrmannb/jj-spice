@@ -41,6 +41,30 @@ cargo install --path cli
 Pre-built binaries for Linux, macOS, and Windows are available on the
 [GitHub Releases](https://github.com/alejoborbo/jj-spice/releases) page.
 
+## Configuration
+
+### Output mode
+
+`jj-spice` supports two output modes that control how status badges and
+links are rendered in the terminal:
+
+| Mode | Status badge | Links | Requirements |
+|------|-------------|-------|--------------|
+| **modern** (default) | Powerline pill glyphs | OSC 8 clickable hyperlinks | [Nerd Font](https://www.nerdfonts.com/) |
+| **classic** | ASCII brackets `[Open]` | Plain text with URL | Any terminal |
+
+By default, `jj-spice` uses **modern** output. If your terminal does not
+have a Nerd Font installed (the Powerline glyphs will render as `?` or
+blank squares), switch to classic mode in your jj config:
+
+```toml
+[spice]
+output = "classic"
+```
+
+This can be set at any level of the jj config hierarchy (user, repo, or
+workspace).
+
 ## Use it directly in jj
 
 You can register `jj-spice` an alias, and use it directly with `jj`. It can be setup using the following subcommand:

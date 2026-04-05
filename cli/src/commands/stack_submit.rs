@@ -133,7 +133,7 @@ pub async fn run(
                 }
                 _ => {
                     writeln!(
-                        env.ui.warning_default(),
+                        env.ui.hint_no_heading(),
                         "{}: already tracked, skipping",
                         meta.name,
                     )?;
@@ -684,7 +684,7 @@ async fn get_existing_change_request(
         1 => Ok(Some(metas.into_iter().next().unwrap())),
         _ => {
             writeln!(
-                ui.warning_default(),
+                ui.hint_no_heading(),
                 "{bookmark}: found {} change requests on the forge",
                 metas.len()
             )?;

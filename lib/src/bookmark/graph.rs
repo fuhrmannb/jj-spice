@@ -337,17 +337,24 @@ impl<'a> BookmarkGraph<'a> {
         let mut nodes: BTreeMap<String, BookmarkNode> = BTreeMap::new();
         let mut edges: BTreeMap<String, Vec<GraphEdge<String>>> = BTreeMap::new();
         let mut descendants: BTreeMap<String, Vec<GraphEdge<String>>> = BTreeMap::new();
-        let mut visited: HashSet<&CommitId> = HashSet::new();
+
+        // Track which (commit, parent_name) pairs have been processed.
+        // Bookmarked commits only need one visit per commit (the bookmark
+        // name replaces parent_name for children).  Non-bookmarked commits
+        // need one visit per distinct parent_name so that every parent name
+        // propagates through merge points to downstream bookmarks.
+        let mut visited_bookmarked: HashSet<&CommitId> = HashSet::new();
+        let mut visited_passthrough: HashSet<(&CommitId, Option<&str>)> = HashSet::new();
 
         let mut stack: Vec<(&CommitId, Option<&str>)> =
             head_commits.into_iter().map(|c| (c, None)).collect();
 
         while let Some((commit_id, parent_name)) = stack.pop() {
-            let already_visited = !visited.insert(commit_id);
-
             let maybe_bookmarks = bookmarks_per_commit.get(commit_id);
 
             if let Some(bookmarks) = maybe_bookmarks {
+                let first_visit = visited_bookmarked.insert(commit_id);
+
                 for bookmark in bookmarks {
                     let name = bookmark.name().to_string();
 
@@ -379,24 +386,27 @@ impl<'a> BookmarkGraph<'a> {
                             .push(GraphEdge::direct(name.clone()));
                     }
                 }
-            }
 
-            // Only traverse children on first visit to avoid infinite loops.
-            if already_visited {
-                continue;
-            }
-
-            if let Some(graph_node) = commit_index.get(commit_id) {
-                if let Some(bookmarks) = maybe_bookmarks {
-                    // Push children once per bookmark on this commit,
-                    // so each child discovers all parent bookmarks.
+                // Bookmarked commits: only traverse children on first visit.
+                // The bookmark name replaces parent_name for children, so
+                // re-visits would push identical (child, bookmark) pairs.
+                if first_visit && let Some(graph_node) = commit_index.get(commit_id) {
                     for bookmark in bookmarks {
                         for edge in &graph_node.1 {
                             stack.push((&edge.target, Some(bookmark.name())));
                         }
                     }
-                } else {
-                    // No bookmarks on this commit — pass through the parent name.
+                }
+            } else {
+                // Non-bookmarked commit: pass through the parent name.
+                // A merge commit with no bookmark can be reached via
+                // multiple parent paths; each carries a different
+                // parent_name that must reach the downstream bookmarks.
+                // Guard on (commit, parent_name) to avoid redundant work.
+                if !visited_passthrough.insert((commit_id, parent_name)) {
+                    continue;
+                }
+                if let Some(graph_node) = commit_index.get(commit_id) {
                     for edge in &graph_node.1 {
                         stack.push((&edge.target, parent_name));
                     }
@@ -1076,6 +1086,136 @@ mod tests {
         assert_eq!(c_desc, vec!["feat-d"]);
         assert!(!descendants.contains_key("feat-b"));
         assert!(!descendants.contains_key("feat-d"));
+    }
+
+    #[test]
+    fn build_bookmark_graph_diamond_through_unbookmarked_merge() {
+        // Regression: when a merge commit has NO bookmark, the DFS must
+        // still propagate every parent name through it.  Previously only
+        // the first parent_name to reach the merge was passed through.
+        //
+        // Commit graph (roots-first / reversed):
+        //
+        //   library(1)
+        //    / | \
+        //  d(2) s(3) c(4)        ← bookmarked
+        //    \ | /
+        //   merge(5)              ← NO bookmark
+        //     |
+        //   mid(6)                ← NO bookmark
+        //     |
+        //   tip(7)                ← bookmarked "integration-test"
+        //
+        // Expected bookmark edges:
+        //   integration-test -> [deployment, service, cnp]
+        //   deployment       -> [library]
+        //   service          -> [library]
+        //   cnp              -> [library]
+        //   library          -> []
+        let lib = commit_id(1);
+        let d = commit_id(2);
+        let s = commit_id(3);
+        let c = commit_id(4);
+        let merge = commit_id(5);
+        let mid = commit_id(6);
+        let tip = commit_id(7);
+
+        let reversed: Vec<GraphNode<CommitId>> = vec![
+            (
+                lib.clone(),
+                vec![
+                    GraphEdge::direct(d.clone()),
+                    GraphEdge::direct(s.clone()),
+                    GraphEdge::direct(c.clone()),
+                ],
+            ),
+            (d.clone(), vec![GraphEdge::direct(merge.clone())]),
+            (s.clone(), vec![GraphEdge::direct(merge.clone())]),
+            (c.clone(), vec![GraphEdge::direct(merge.clone())]),
+            (merge.clone(), vec![GraphEdge::direct(mid.clone())]),
+            (mid.clone(), vec![GraphEdge::direct(tip.clone())]),
+            (tip.clone(), vec![]),
+        ];
+
+        let bookmarks = bookmark_map(vec![
+            (lib.clone(), vec!["library"]),
+            (d.clone(), vec!["deployment"]),
+            (s.clone(), vec!["service"]),
+            (c.clone(), vec!["cnp"]),
+            (tip.clone(), vec!["integration-test"]),
+        ]);
+
+        let (nodes, edges, descendants) =
+            BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
+
+        assert_eq!(nodes.len(), 5);
+
+        // integration-test must have all three feature bookmarks as ascendants.
+        let it_ascendants: HashSet<&str> = nodes["integration-test"]
+            .ascendants()
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
+        assert_eq!(
+            it_ascendants.len(),
+            3,
+            "integration-test should have 3 ascendants, got: {it_ascendants:?}"
+        );
+        assert!(it_ascendants.contains("deployment"));
+        assert!(it_ascendants.contains("service"));
+        assert!(it_ascendants.contains("cnp"));
+
+        // Edges: integration-test -> {deployment, service, cnp}
+        let it_edge_targets: HashSet<&str> = edges["integration-test"]
+            .iter()
+            .map(|e| e.target.as_str())
+            .collect();
+        assert_eq!(it_edge_targets.len(), 3);
+        assert!(it_edge_targets.contains("deployment"));
+        assert!(it_edge_targets.contains("service"));
+        assert!(it_edge_targets.contains("cnp"));
+
+        // Each feature bookmark has library as sole ascendant.
+        for name in &["deployment", "service", "cnp"] {
+            assert_eq!(
+                nodes[*name].ascendants(),
+                &["library"],
+                "{name} should have library as sole ascendant"
+            );
+            let targets: Vec<&str> = edges[*name].iter().map(|e| e.target.as_str()).collect();
+            assert_eq!(
+                targets,
+                vec!["library"],
+                "{name} edge should point to library"
+            );
+        }
+
+        // library is the root (no ascendants, no edges).
+        assert!(nodes["library"].ascendants().is_empty());
+        assert!(edges["library"].is_empty());
+
+        // descendants: library -> {deployment, service, cnp},
+        // each feature -> integration-test
+        let lib_desc: HashSet<&str> = descendants["library"]
+            .iter()
+            .map(|e| e.target.as_str())
+            .collect();
+        assert_eq!(lib_desc.len(), 3);
+        assert!(lib_desc.contains("deployment"));
+        assert!(lib_desc.contains("service"));
+        assert!(lib_desc.contains("cnp"));
+
+        for name in &["deployment", "service", "cnp"] {
+            let desc: Vec<&str> = descendants[*name]
+                .iter()
+                .map(|e| e.target.as_str())
+                .collect();
+            assert_eq!(
+                desc,
+                vec!["integration-test"],
+                "{name} should have integration-test as descendant"
+            );
+        }
     }
 
     // -- Public accessor tests --
